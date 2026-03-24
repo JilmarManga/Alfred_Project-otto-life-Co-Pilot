@@ -1,0 +1,45 @@
+curl -X POST http://127.0.0.1:8000/webhook \
+  -H "Content-Type: application/json" \
+  -d '{
+    "object": "whatsapp_business_account",
+    "entry": [
+      {
+        "id": "entry_1",
+        "changes": [
+          {
+            "field": "messages",
+            "value": {
+              "messaging_product": "whatsapp",
+              "metadata": {
+                "display_phone_number": "15550000000",
+                "user_phone_number": "123456789"
+              },
+              "contacts": [
+                {
+                  "profile": {
+                    "name": "Test User"
+                  },
+                  "wa_id": "15551234567"
+                }
+              ],
+              "messages": [
+                {
+                  "from": "15551234567",
+                  "id": "wamid.TEST123",
+                  "timestamp": "1710000000",
+                  "type": "text",
+                  "text": {
+                    "body": "I spent 12 dollars on coffee"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }'
+
+
+# Answer
+{"status":"received","event_type":"incoming_message","intent":"expense","extracted_expense":{"amount":12.0,"currency":"USD","category":"other","description":"i spent 12 dollars on coffee","confidence":0.4}}%
