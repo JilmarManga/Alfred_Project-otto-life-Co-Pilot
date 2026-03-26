@@ -12,6 +12,10 @@ from app.repositories.expense_repository import ExpenseRepository
 from app.services.response_service import generate_response
 from app.services.whatsapp_sender import send_whatsapp_message
 from app.ai.ai_service import generate_ai_response
+from app.services.google_calendar import get_today_events, normalize_events, summarize_day, describe_next_event, format_events_detailed
+
+from app.db.user_context_store import update_user_context, get_user_context
+from app.routers.llm_intent_router import route_with_llm
 
 
 
@@ -74,11 +78,30 @@ async def receive_webhook(request: Request) -> dict:
     extracted_expense = None
 
     if isinstance(event, IncomingMessageEvent):
+
         # Map to canonical inbound message
         inbound_message = map_incoming_event_to_inbound_message(event)
-        # Classify intent
-        intent_obj = classify_message_intent(inbound_message)
-        intent = intent_obj.intent
+        print("📩 User message:", inbound_message.text)
+
+        # Get user context
+        context = get_user_context(inbound_message.user_phone_number)
+
+        # Try LLM first
+        llm_result = route_with_llm(inbound_message.text, context)
+        print("🧠 LLM RESULT:", llm_result)
+
+        if llm_result:
+            intent = llm_result.get("intent", "unknown")
+            index = llm_result.get("index", None)
+        else:
+            index = None
+
+            # Classify intent
+            intent_obj = classify_message_intent(inbound_message)
+            intent = intent_obj.intent
+            print("🧠 Detected intent:", intent)
+            print("📩 User message:", inbound_message.text)
+
         # If intent is expense, extract structured expense via GPT + fallback
         if intent == "expense":
             extracted_expense = await extract_expense(inbound_message)
@@ -90,30 +113,85 @@ async def receive_webhook(request: Request) -> dict:
                     expense=extracted_expense,
                 )
 
+                # Generate otto response
+                fallback_response = generate_response(
+                    user_text=inbound_message.text,
+                    expense=extracted_expense.dict(),
+                    user_stats=None
+                )
+
+                # Use AI to generate a more natural, conversational reply, with a fallback to the template-based response
                 reply_text = generate_ai_response(
                     f"""
                 User message: {inbound_message.text}
-
                 Extracted expense: {extracted_expense.dict()}
-
-                Respond as Alfred confirming the expense in a natural, short way.
+                Respond as otto confirming the expense in a natural, short way.
                 """,
-                    # Generate Alfred response
-                    fallback_response = generate_response(
-                        user_text=inbound_message.text,
-                        expense=extracted_expense.dict(),
-                        user_stats=None
-                    )
+                    fallback_response=fallback_response
                 )
 
                 try:
-                    #print(f"Alfred reply: {reply_text}")
+                    #print(f"otto reply: {reply_text}")
+                    print("🐙 otto reply:", reply_text)
                     send_whatsapp_message(
                         inbound_message.user_phone_number,
                         reply_text
                     )
                 except Exception as e:
                     print(f"❌ Failed to send WhatsApp message: {e}")
+
+        elif intent == "calendar_followup":
+            events = context.get("today_events", [])
+            selected_event = None
+
+            if events and index is not None and index < len(events):
+                selected_event = events[index]
+                reply_text = f"{selected_event['start'].split('T')[1][:5]} — {selected_event['title']}"
+            else:
+                reply_text = "No encontré ese evento"
+
+            try:
+                print("🐙 otto reply:", reply_text)
+                send_whatsapp_message(
+                    inbound_message.user_phone_number,
+                    reply_text
+                )
+            except Exception as e:
+                print(f"❌ Failed to send WhatsApp message: {e}")
+
+        elif intent == "calendar_query":
+            events_raw = get_today_events()
+            events = normalize_events(events_raw)
+
+            #reply_text = summarize_day(events)
+            text = inbound_message.text.lower()
+
+            # Update user context with calendar info for potential follow-ups
+            update_user_context(
+                inbound_message.user_phone_number,
+                "last_intent",
+                "calendar_query"
+            )
+
+            update_user_context(
+                inbound_message.user_phone_number,
+                "today_events",
+                events
+            )
+
+            if llm_result and llm_result.get("list_all"):
+                reply_text = format_events_detailed(events)
+            else:
+                reply_text = summarize_day(events)
+
+            try:
+                print("🐙 otto reply:", reply_text)
+                send_whatsapp_message(
+                    inbound_message.user_phone_number,
+                    reply_text
+                )
+            except Exception as e:
+                print(f"❌ Failed to send WhatsApp message: {e}")
 
     # Return structured response
     return {

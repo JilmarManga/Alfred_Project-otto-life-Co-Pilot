@@ -5,5 +5,5 @@ class MessageIntent(BaseModel):
     """
     canonical clasification result for an inbound user message
     """
-    intent: Literal['greeting', 'question', 'statement', 'command', 'expense', 'unknown']
+    intent: Literal['greeting', 'question', 'statement', 'command', 'expense', 'unknown', 'calendar_query']
     confidence: float = Field(ge=0.0, le=1.0)

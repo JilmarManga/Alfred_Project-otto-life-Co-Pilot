@@ -66,12 +66,19 @@ def _looks_like_money_amount(text: str) -> bool:
 
 def classify_message_intent(message: InboundMessage) -> MessageIntent:
     """
-    Classify an inbound message into Alfred's current MVP intents.
+    Classify an inbound message into otto's current MVP intents.
 
     This first version uses lightweight deterministic heuristics to detect
     likely expense messages from text content only.
     """
     text = (message.text or "").strip().lower()
+
+    # Calendar intent detection
+    if any(word in text for word in [
+        "calendar", "meeting", "event", "agenda", "schedule",
+        "hoy", "today", "reunión", "reunion", "cita"
+    ]):
+        return MessageIntent(intent="calendar_query", confidence=0.9)
 
     if not text:
         return MessageIntent(intent="unknown", confidence=0.0)

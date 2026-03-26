@@ -1,4 +1,10 @@
 # Activate the virtual environment
-source ../FastAPI/bin/activate
+source venv/bin/activate
+
+# Restart local 1:8000
 uvicorn app.main:app --reload
 fastapi dev
+
+# Making publick local server: Ngrok
+ngrok http 8000
+
