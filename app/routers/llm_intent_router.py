@@ -19,11 +19,18 @@ def route_with_llm(user_message: str, context: dict):
                     2. Detect follow-up questions using context
                     3. Return structured JSON ONLY
 
+                    Detect the language of the user message:
+                    Return "language" as:
+                    - "es" if the user writes in Spanish
+                    - "en" if the user writes in English
+                    Always include it in the JSON output.
+
                     Possible intents:
                     - calendar_query → user wants to know what they have scheduled (today, tomorrow, etc.)
                     - calendar_followup → user refers to a specific event already mentioned
                     - expense → user is logging or talking about money spent
                     - unknown → anything else
+                    - travel_check → user is asking if they should leave now or about timing to go somewhere
 
                     Calendar understanding rules:
 
@@ -62,14 +69,28 @@ def route_with_llm(user_message: str, context: dict):
                     {
                     "intent": "...",
                     "index": number or null,
-                    "list_all": true/false
+                    "list_all": true/false,
+                    "language": "es" | "en"
                     }
+                    - ALWAYS include "language"
 
                     Rules:
                     - If user refers to a specific event (first, second, tercero, etc) → calendar_followup
                     - Always return the correct index when possible
                     - Use context if available
                     - Be precise
+
+                    Travel check rules:
+                    - If the user asks:
+                    - "¿salgo ya?"
+                    - "should I leave now?"
+                    - "do I need to go now?"
+                    - "is it time to leave?"
+
+                    → intent = travel_check
+
+                    - If the user refers implicitly to the next or selected event, use context
+                    - No index required unless explicitly mentioned
 
                     """
                 },
