@@ -1,6 +1,7 @@
 import datetime
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from app.services.morning_brief.message_builder import format_time_human
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
@@ -87,8 +88,8 @@ def summarize_day(events):
     last_event_time = events_sorted[-1]["start"]
 
     # Extract hour:minute
-    first_time = first_event_time.split("T")[1][:5]
-    last_time = last_event_time.split("T")[1][:5]
+    first_time = format_time_human(first_event_time, "es")
+    last_time = format_time_human(last_event_time, "es")
 
     if total == 1:
         return f"Tienes 1 evento hoy. Empieza a las {first_time}"
@@ -101,7 +102,7 @@ def format_events_detailed(events):
     detailed_list = []
 
     for e in events:
-        time_part = e["start"].split("T")[1][:5]
+        time_part = format_time_human(e["start"], "es")
 
         if e["is_virtual"]:
             detail = f"{time_part} — {e['title']} (virtual)"

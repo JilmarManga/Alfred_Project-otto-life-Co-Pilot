@@ -41,10 +41,11 @@ def compose_morning_insights(user_id: str) -> MorningBriefData:
 
             # Use user's last known location as origin
             user_context = get_user_context(user_id)
-            user_origin = user_context.get("last_known_location")
+            user_origin = user_context.get("last_known_location", "Bogotá, Colombia")  # default fallback
 
             try:
                 leave_at, duration_minutes = estimate_travel_info(
+                    user_origin,
                     location,
                     first_event.get("start"),
                 )

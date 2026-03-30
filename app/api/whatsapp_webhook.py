@@ -16,6 +16,7 @@ from app.services.google_calendar import get_today_events, normalize_events, sum
 
 from app.db.user_context_store import update_user_context, get_user_context
 from app.routers.llm_intent_router import route_with_llm
+from app.services.maps.maps_service import format_duration_human
 
 
 
@@ -183,9 +184,10 @@ async def receive_webhook(request: Request) -> dict:
                     from app.services.maps.maps_service import estimate_travel_info
 
                     leave_at_str, duration_minutes = estimate_travel_info(location, start_raw)
-
                     if leave_at_str and duration_minutes:
-                        reply_text = f"{time_str} - {title}, en {location}. Te demoras {duration_minutes} min, sal a las {leave_at_str}."
+                        #reply_text = f"{time_str} - {title}, en {location}. Te demoras {duration_minutes} min, sal a las {leave_at_str}."
+                        duration_str = format_duration_human(duration_minutes)
+                        reply_text = f"{time_str} - {title}, en {location}. Te demoras {duration_str}, sal a las {leave_at_str}."
                     else:
                         reply_text = f"{time_str} - {title}, en {location}. No pude calcular el tiempo de viaje"
                 else:
