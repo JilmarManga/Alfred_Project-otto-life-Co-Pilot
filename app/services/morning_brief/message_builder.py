@@ -37,43 +37,73 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
     if first_event:
         title = first_event.get("title", "Evento")
         start_raw = first_event.get("start", "")
-
-        location = first_event.get("location")
-        has_location = first_event.get("has_location", False)
-        leave_at = first_event.get("leave_at")
+        location = first_event.get("location", "")
         traffic_note = first_event.get("traffic_note")
+        leave_at = first_event.get("leave_at")
+        has_location = first_event.get("has_location", False)
 
+        # Format event start time
         time_str = ""
-
         if start_raw:
             try:
                 dt = datetime.fromisoformat(start_raw)
                 if language == "es":
-                    time_str = dt.strftime("%I:%M %p").lstrip("0").lower()
+                    time_str = dt.strftime("%-I:%M %p").lower()
                 else:
-                    time_str = dt.strftime("%I:%M %p").lstrip("0")
+                    time_str = dt.strftime("%-I:%M %p")
             except Exception:
-                time_str = start_raw  # fallback
+                time_str = start_raw
 
+        # Ensure traffic_str is always computed if traffic_note exists
+        traffic_str = None
+        if traffic_note:
+            try:
+                duration_minutes = int(traffic_note)
+                hours = duration_minutes // 60
+                minutes = duration_minutes % 60
+
+                if hours > 0:
+                    if minutes > 0:
+                        traffic_str = f"{hours} hora{'s' if hours > 1 else ''} y {minutes} min"
+                    else:
+                        traffic_str = f"{hours} hora{'s' if hours > 1 else ''}"
+                else:
+                    traffic_str = f"{minutes} min"
+            except Exception:
+                traffic_str = traffic_note
+
+        # Build message, always add traffic info if available
         if language == "es":
-            if has_location and location and leave_at and traffic_note:
-                lines.append(
-                    f"{title} a las {time_str} en {location} (sal a las {leave_at}, {traffic_note})."
-                )
+            if has_location and location:
+                lines.append(f"El primero es: {title}, a las {time_str} en {location}.")
+                if traffic_str or leave_at:
+                    traffic_part = f"{traffic_str}" if traffic_str else "tráfico info no disponible"
+                    leave_part = f", sal {leave_at}" if leave_at else ""
+                    lines.append(f"Tráfico: {traffic_part}{leave_part}.")
             else:
                 lines.append(f"El primero es a las {time_str}: {title}.")
         else:
-            if has_location and location and leave_at and traffic_note:
-                lines.append(
-                    f"{title} at {time_str} in {location} (leave at {leave_at}, {traffic_note})."
-                )
+            if has_location and location:
+                lines.append(f"The first is: {title} at {time_str}, in {location}.")
+                if traffic_str or leave_at:
+                    traffic_part = f"{traffic_str}" if traffic_str else "traffic info unavailable"
+                    leave_part = f", leave at {leave_at}" if leave_at else ""
+                    lines.append(f"Traffic: {traffic_part}{leave_part}.")
             else:
                 lines.append(f"The first is at {time_str}: {title}.")
 
     # 4. Weather
     summary = weather.get("summary", "")
-
+    temperature = weather.get("temperature")
     if summary:
-        lines.append(summary)
+        weather_msg = f"Clima: {summary}"
+        if temperature:
+            weather_msg += f", {temperature}"
+        lines.append(weather_msg)
+
+    # Debugging output
+    print("🔍 DEBUG — Morning Briefing Generated:")
+    print("🧠 LLM result data:", data)
+    print("🐙 Otto reply message:", " ".join(lines))
 
     return " ".join(lines)

@@ -74,7 +74,7 @@ async def receive_webhook(request: Request) -> dict:
         ) from exc
 
     event = await route_incoming_message(payload)
-    
+
     # Prevent duplicate processing (Meta may retry webhooks)
     if isinstance(event, dict) and event.get("status") == "received":
         return event
@@ -151,7 +151,7 @@ async def receive_webhook(request: Request) -> dict:
             events = context.get("today_events", [])
             selected_event = None
 
-            if events and index is not None and index < len(events):
+            if events and index is not None and 0 <= index < len(events):
                 selected_event = events[index]
 
                 # Store for future travel queries
@@ -160,6 +160,10 @@ async def receive_webhook(request: Request) -> dict:
                     "last_referenced_event",
                     selected_event
                 )
+
+            # Fallback: if no index, use last referenced event
+            if selected_event is None:
+                selected_event = context.get("last_referenced_event")
 
             if selected_event:
                 start_raw = selected_event.get("start", "")
@@ -246,7 +250,7 @@ async def receive_webhook(request: Request) -> dict:
                     if not selected_event and events:
                         selected_event = events[-1]
 
-            # 🚨 NEW: handle missing selected_event safely
+            # NEW: handle missing selected_event safely
             if not selected_event:
                 reply_text = "No tengo eventos para hoy"
             else:

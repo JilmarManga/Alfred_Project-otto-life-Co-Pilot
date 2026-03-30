@@ -1,0 +1,37 @@
+# app/services/weather_service.py
+
+import os
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_KEY = os.getenv("OPENWEATHER_API_KEY")
+BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
+
+def get_weather_for_today(user_city: str) -> dict:
+    """
+    Returns current weather for a given city.
+    Output example: {"summary": "Soleado", "temperature": "23°C"}
+    """
+    if not API_KEY:
+        return {"summary": "Clima no disponible", "temperature": None}
+
+    params = {
+        "q": user_city,
+        "appid": API_KEY,
+        "units": "metric",
+        "lang": "es"
+    }
+
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        summary = data.get("weather", [{}])[0].get("description", "")
+        temperature = data.get("main", {}).get("temp")
+        temperature_str = f"{temperature:.0f}°C" if temperature is not None else None
+        return {"summary": summary, "temperature": temperature_str}
+    except Exception as e:
+        print(f"❌ Weather API error: {e}")
+        return {"summary": "Clima no disponible", "temperature": None}
