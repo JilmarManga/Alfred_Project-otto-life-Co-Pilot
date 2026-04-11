@@ -1,7 +1,9 @@
 import os
+import logging
 import requests
 from datetime import datetime, timedelta
 
+logger = logging.getLogger(__name__)
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 
@@ -76,7 +78,7 @@ def format_duration_human(minutes: int) -> str:
 
 
 # Refactored to match new API signature and handle missing data gracefully
-def estimate_travel_info(destination: str, departure_time_iso: str):
+def estimate_travel_info(destination: str, departure_time_iso: str, origin: str = "Bogotá, Colombia"):
     """
     Returns:
     - leave_at (str, e.g. "3:00 PM")
@@ -84,6 +86,7 @@ def estimate_travel_info(destination: str, departure_time_iso: str):
     """
 
     if not GOOGLE_MAPS_API_KEY:
+        logger.warning("GOOGLE_MAPS_API_KEY not set — skipping travel estimate")
         return None, None
 
     try:
@@ -93,7 +96,7 @@ def estimate_travel_info(destination: str, departure_time_iso: str):
         url = "https://maps.googleapis.com/maps/api/directions/json"
 
         params = {
-            "origin": "Funza, Cundinamarca, Colombia",
+            "origin": origin,
             "destination": destination,
             "departure_time": departure_timestamp,
             "key": GOOGLE_MAPS_API_KEY,
@@ -104,13 +107,18 @@ def estimate_travel_info(destination: str, departure_time_iso: str):
 
         routes = data.get("routes", [])
         if not routes:
+            logger.warning("Maps API returned no routes. Status: %s | origin=%s destination=%s", data.get("status"), origin, destination)
             return None, None
 
         leg = routes[0]["legs"][0]
 
+        # Try traffic-aware duration first, fall back to regular duration
         duration_sec = leg.get("duration_in_traffic", {}).get("value")
+        if not duration_sec:
+            duration_sec = leg.get("duration", {}).get("value")
 
         if not duration_sec:
+            logger.warning("Maps API returned route but no duration for %s → %s", origin, destination)
             return None, None
 
         duration_minutes = int(duration_sec / 60)
@@ -124,5 +132,5 @@ def estimate_travel_info(destination: str, departure_time_iso: str):
         return leave_at_str, duration_minutes
 
     except Exception as e:
-        print("Maps error:", e)
+        logger.error("Maps error for %s → %s: %s", origin, destination, e)
         return None, None

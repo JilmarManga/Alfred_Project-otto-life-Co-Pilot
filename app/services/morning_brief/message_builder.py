@@ -54,19 +54,6 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
         has_location = first_event.get("has_location", False)
 
         # Format event start time
-        def format_time_human(iso_str: str, language: str = "es") -> str:
-            try:
-                dt = datetime.fromisoformat(iso_str)
-                formatted = dt.strftime("%I:%M %p").lstrip("0")
-
-                if language == "es":
-                    return formatted.lower()  # "3:30 pm"
-                return formatted  # "3:30 PM"
-            except Exception:
-                return iso_str
-
-
-        # Format event start time
         time_str = format_time_human(start_raw, language) if start_raw else ""
 
         '''time_str = ""

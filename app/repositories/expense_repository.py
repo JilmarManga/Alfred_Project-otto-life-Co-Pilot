@@ -3,6 +3,7 @@ from typing import Dict
 
 from app.core.firebase import db
 from app.models.extracted_expense import ExtractedExpense
+from datetime import datetime
 
 
 class ExpenseRepository:
@@ -24,8 +25,8 @@ class ExpenseRepository:
             "user_phone_number": user_phone_number,
             "amount": expense.amount,
             "currency": expense.currency,
+            "user_message": expense.description,
             "category": expense.category,
-            "description": expense.description,
             "confidence": expense.confidence,
             "source": "whatsapp user's chat",
             "created_at": datetime.utcnow(),
@@ -37,3 +38,23 @@ class ExpenseRepository:
             "expense_id": doc_ref.id,
             "status": "stored"
         }
+
+    @staticmethod
+    def get_expenses_by_date_range(user_phone_number: str, start_date: datetime, end_date: datetime):
+            """
+            Retrieve expenses for a given user and date range
+            """
+            expenses_ref = db.collection("expenses")
+            query = (
+                expenses_ref
+                .where("user_phone_number", "==", user_phone_number)
+                .where("created_at", ">=", start_date)
+                .where("created_at", "<=", end_date)
+                )
+
+            docs = query.stream()
+
+            expenses = []
+            for doc in docs:
+                expenses.append(doc.to_dict())
+            return expenses

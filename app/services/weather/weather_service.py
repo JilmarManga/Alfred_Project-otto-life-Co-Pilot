@@ -9,7 +9,7 @@ load_dotenv()
 API_KEY = os.getenv("OPENWEATHER_API_KEY")
 BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 
-def get_weather_for_today(user_city: str) -> dict:
+def get_weather_for_today(user_city: str, lang: str = "es") -> dict:
     """
     Returns current weather for a given city.
     Output example: {"summary": "Soleado", "temperature": "23°C"}
@@ -17,15 +17,20 @@ def get_weather_for_today(user_city: str) -> dict:
     if not API_KEY:
         return {"summary": "Clima no disponible", "temperature": None}
 
+    # OpenWeatherMap uses 2-letter codes; map "en" → "en", "es" → "es"
+    api_lang = lang if lang in {"es", "en"} else "es"
+
     params = {
         "q": user_city,
         "appid": API_KEY,
         "units": "metric",
-        "lang": "es"
+        "lang": api_lang,
     }
 
     try:
         response = requests.get(BASE_URL, params=params, timeout=5)
+        if response.status_code == 404:
+            return {"summary": None, "temperature": None, "error": "city_not_found"}
         response.raise_for_status()
         data = response.json()
         summary = data.get("weather", [{}])[0].get("description", "")
@@ -34,4 +39,4 @@ def get_weather_for_today(user_city: str) -> dict:
         return {"summary": summary, "temperature": temperature_str}
     except Exception as e:
         print(f"❌ Weather API error: {e}")
-        return {"summary": "Clima no disponible", "temperature": None}
+        return {"summary": None, "temperature": None, "error": "api_error"}

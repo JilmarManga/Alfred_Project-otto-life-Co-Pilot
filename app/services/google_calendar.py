@@ -1,5 +1,6 @@
 import datetime
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from app.services.morning_brief.message_builder import format_time_human
 
@@ -11,6 +12,10 @@ def get_calendar_service():
         "credentials/token.json",
         SCOPES
     )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        with open("credentials/token.json", "w") as f:
+            f.write(creds.to_json())
     service = build("calendar", "v3", credentials=creds)
     return service
 

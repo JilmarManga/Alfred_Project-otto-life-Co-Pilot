@@ -45,9 +45,9 @@ def compose_morning_insights(user_id: str) -> MorningBriefData:
 
             try:
                 leave_at, duration_minutes = estimate_travel_info(
-                    user_origin,
-                    location,
-                    first_event.get("start"),
+                    destination=location,
+                    departure_time_iso=first_event.get("start"),
+                    origin=user_origin,
                 )
                 print(f"🔍 DEBUG: leave_at={leave_at}, duration_minutes={duration_minutes}")
                 print(f"🔍 DEBUG: first_event location: {location}")
