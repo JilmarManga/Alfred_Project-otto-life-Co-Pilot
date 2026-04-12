@@ -1,4 +1,4 @@
-from app.db.user_context_store import get_user_context, update_user_context
+from app.db.user_context_store import update_user_context
 from app.services.google_calendar import get_today_events, normalize_events
 from app.services.maps.maps_service import estimate_travel_info
 from app.models.morning_brief import MorningBriefData
@@ -6,7 +6,7 @@ from app.services.weather.weather_service import get_weather_for_today
 
 
 
-def compose_morning_insights(user_id: str) -> MorningBriefData:
+def compose_morning_insights(user_id: str, user_location: str = "Bogotá, Colombia") -> MorningBriefData:
     """
     Returns structured data for the morning brief.
     Calendar + dynamic weather + travel info for first event.
@@ -21,13 +21,8 @@ def compose_morning_insights(user_id: str) -> MorningBriefData:
     # 3. Count
     event_count = len(normalized_events)
 
-    # 4. Weather info
-    # Get user context for dynamic location
-    context = get_user_context(user_id)
-    user_city = context.get("last_known_location", "Bogotá, Colombia")  # fallback if unknown
-
-    # Fetch weather dynamically based on user location
-    weather_info = get_weather_for_today(user_city=user_city)
+    # 4. Weather info — use Firestore location passed in
+    weather_info = get_weather_for_today(user_city=user_location)
 
     # 5. First event
     first_event = None
@@ -39,9 +34,8 @@ def compose_morning_insights(user_id: str) -> MorningBriefData:
             first_event["has_location"] = True
             location = first_event.get("location")
 
-            # Use user's last known location as origin
-            user_context = get_user_context(user_id)
-            user_origin = user_context.get("last_known_location", "Bogotá, Colombia")  # default fallback
+            # Use user's Firestore location as origin
+            user_origin = user_location
 
             try:
                 leave_at, duration_minutes = estimate_travel_info(

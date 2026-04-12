@@ -109,7 +109,8 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
     summary = weather.get("summary", "")
     temperature = weather.get("temperature")
     if summary:
-        weather_msg = f"Clima: {summary}"
+        label = "Clima" if language == "es" else "Weather"
+        weather_msg = f"{label}: {summary}"
         if temperature:
             weather_msg += f", {temperature}"
         lines.append(weather_msg)

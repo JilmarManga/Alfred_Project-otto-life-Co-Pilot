@@ -24,10 +24,10 @@ def handle_onboarding(inbound: InboundMessage, user: dict | None) -> bool:
 
     # --- State 2: User exists but language not set ---
     if not user.get("language"):
-        text_lower = text.lower()
-        if "es" in text_lower or "español" in text_lower:
+        words = text.lower().split()
+        if any(w in words for w in ["es", "español", "spanish"]):
             language = "es"
-        elif "en" in text_lower or "english" in text_lower:
+        elif any(w in words for w in ["en", "english", "inglés"]):
             language = "en"
         else:
             send_whatsapp_message(phone, "Please reply: Español or English")
