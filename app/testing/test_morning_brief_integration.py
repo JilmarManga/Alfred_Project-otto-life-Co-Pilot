@@ -78,7 +78,7 @@ def test_user_not_found_in_firestore_uses_safe_defaults(mock_get_user, mock_comp
         language="es",
         user_name=None,
     )
-    mock_compose.assert_called_once_with("+0000000000", user_location="Bogotá, Colombia")
+    mock_compose.assert_called_once_with("+0000000000", user_location="Bogotá, Colombia", lang="es")
 
 
 @patch("app.services.morning_briefing.send_whatsapp_message")
@@ -91,7 +91,7 @@ def test_firestore_location_is_passed_to_composer(mock_get_user, mock_compose, m
 
     run_morning_briefing("+1234567890")
 
-    mock_compose.assert_called_once_with("+1234567890", user_location="San Francisco, CA")
+    mock_compose.assert_called_once_with("+1234567890", user_location="San Francisco, CA", lang="en")
 
 
 # ── Tests for compose_morning_insights: location flows to weather API ───────
@@ -103,7 +103,7 @@ def test_weather_api_called_with_firestore_location(mock_weather, mock_events):
 
     compose_morning_insights("user_123", user_location="Cartagena, Colombia")
 
-    mock_weather.assert_called_once_with(user_city="Cartagena, Colombia")
+    mock_weather.assert_called_once_with(user_city="Cartagena, Colombia", lang="es")
 
 
 @patch("app.services.morning_brief.morning_brief_composer.get_today_events", return_value=[])
@@ -113,7 +113,7 @@ def test_weather_api_not_using_bogota_for_non_bogota_user(mock_weather, mock_eve
 
     compose_morning_insights("user_456", user_location="Buenos Aires, Argentina")
 
-    mock_weather.assert_called_once_with(user_city="Buenos Aires, Argentina")
+    mock_weather.assert_called_once_with(user_city="Buenos Aires, Argentina", lang="es")
     # Verify Bogotá fallback was NOT used
     call_city = mock_weather.call_args[1]["user_city"]
     assert call_city != "Bogotá, Colombia"

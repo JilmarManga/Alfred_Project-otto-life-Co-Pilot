@@ -13,7 +13,7 @@ def run_morning_briefing(user_phone_number: str):
     user_location = user.get("location", "Bogotá, Colombia")
 
     # 1. Compose structured insights
-    data = compose_morning_insights(user_phone_number, user_location=user_location)
+    data = compose_morning_insights(user_phone_number, user_location=user_location, lang=language)
 
     # 2. Build deterministic message
     message = build_morning_message(

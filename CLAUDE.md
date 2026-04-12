@@ -69,26 +69,29 @@ ParsedMessage(
 
 **Routing priority order (strict — do not reorder without good reason):**
 ```python
-if parsed.amount is not None:    -> ExpenseAgent
-if signal in TRAVEL_KEYWORDS:    -> TravelAgent      # checked before calendar — avoids "reunion" collision
-if signal in WEATHER_KEYWORDS:   -> WeatherAgent
-if signal in CALENDAR_KEYWORDS:  -> CalendarAgent
-if signal in SUMMARY_KEYWORDS:   -> SummaryAgent
-else:                            -> AmbiguityAgent
+if parsed.amount is not None:       -> ExpenseAgent
+if signal in TRAVEL_KEYWORDS:       -> TravelAgent      # checked before calendar — avoids "reunion" collision
+if signal in WEATHER_KEYWORDS:      -> WeatherAgent
+if signal in SUMMARY_KEYWORDS:      -> SummaryAgent     # specific money words beat generic calendar words like "have"
+if signal in CALENDAR_KEYWORDS:     -> CalendarAgent
+if parsed.event_reference is not None: -> CalendarAgent # ordinal/next follow-ups with no keyword
+else:                               -> AmbiguityAgent
 ```
 
 **Keyword sets:**
 ```python
-CALENDAR_KEYWORDS = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo"}
+CALENDAR_KEYWORDS = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
 WEATHER_KEYWORDS  = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
 SUMMARY_KEYWORDS  = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses"}
 TRAVEL_KEYWORDS   = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
 ```
 
 **Important design decisions:**
-- "hoy", "today", "mañana", "tomorrow" are intentionally NOT in `CALENDAR_KEYWORDS` — they are time modifiers, not intent signals. "tengo" is the calendar-intent word ("qué tengo hoy?")
-- Travel is checked before Calendar so "a qué hora debo salir para mi reunión?" routes to TravelAgent, not CalendarAgent
-- These same keyword sets are mirrored in `parser/message_parser.py` for signal scanning
+- "hoy", "today", "mañana", "tomorrow" are intentionally NOT in `CALENDAR_KEYWORDS` — they are time modifiers, not intent signals. "tengo" / "have" / "day" are the calendar-intent words.
+- Summary is checked before Calendar: `"have"` + `"spent"` → SummaryAgent wins (specific money words beat generic calendar words).
+- Travel is checked before Calendar so "a qué hora debo salir para mi reunión?" routes to TravelAgent, not CalendarAgent.
+- `event_reference` routing catches ordinal follow-ups ("Y el segundo?") that contain no keyword.
+- These same keyword sets are mirrored in `parser/message_parser.py` for signal scanning.
 
 **Forbidden:** calling LLM, calling Firestore, confidence scores, making routing assumptions
 

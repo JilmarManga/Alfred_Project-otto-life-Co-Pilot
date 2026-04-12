@@ -6,7 +6,7 @@ from app.services.weather.weather_service import get_weather_for_today
 
 
 
-def compose_morning_insights(user_id: str, user_location: str = "Bogotá, Colombia") -> MorningBriefData:
+def compose_morning_insights(user_id: str, user_location: str = "Bogotá, Colombia", lang: str = "es") -> MorningBriefData:
     """
     Returns structured data for the morning brief.
     Calendar + dynamic weather + travel info for first event.
@@ -21,8 +21,8 @@ def compose_morning_insights(user_id: str, user_location: str = "Bogotá, Colomb
     # 3. Count
     event_count = len(normalized_events)
 
-    # 4. Weather info — use Firestore location passed in
-    weather_info = get_weather_for_today(user_city=user_location)
+    # 4. Weather info — use Firestore location and language
+    weather_info = get_weather_for_today(user_city=user_location, lang=lang)
 
     # 5. First event
     first_event = None

@@ -30,8 +30,14 @@ SummaryAgent:
 - Example: "💰 Esta semana:\n• COP $2.500.000\n• USD $150"
 
 CalendarAgent:
-- List events clearly and briefly. Include time and location.
-- If travel data is present, include "Sal a las X" or "Leave by X".
+- If type is "calendar_query": list all events clearly. Include time and location for each.
+- If type is "calendar_followup": show ONLY that single event — its time and location. Nothing else.
+- If type is "calendar_next_event": use this exact emoji-rich structure (one block, no extra text):
+  🕐 [time] — [title]
+  📍 [location]
+  Sal a las [leave_at] — son [duration] min con tráfico 🚗   (Spanish) or  Leave by [leave_at] — [duration] min with traffic 🚗  (English)
+  [weather emoji matching conditions] [temperature] [weather_summary]
+  Always include the clock emoji matching the hour, 📍 for location, 🚗 for traffic, and a weather emoji (☀️🌤️⛅🌥️☁️🌧️⛈️🌩️❄️🌫️).
 
 TravelAgent:
 - Clearly state when the user should leave and how long the trip takes.
