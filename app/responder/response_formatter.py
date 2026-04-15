@@ -65,6 +65,11 @@ _FALLBACKS = {
     "AmbiguityAgent":{"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
 }
 
+_NEEDS_CURRENCY = {
+    "es": "👌 Anotado. ¿En qué moneda fue? (COP, USD o EUR)",
+    "en": "👌 Got it. Which currency was that? (COP, USD, or EUR)",
+}
+
 # Separate error messages for when the agent itself failed (expense not saved, etc.)
 _ERROR_MESSAGES = {
     "ExpenseAgent":  {"es": "No pude guardar ese gasto. Intenta de nuevo 🙏", "en": "Couldn't save that expense. Try again 🙏"},
@@ -84,6 +89,10 @@ def format_response(result: AgentResult, user: dict) -> str:
     lang_name = "Spanish" if lang == "es" else "English"
     name = user.get("name", "")
     agent = result.agent_name
+
+    # Special case: expense needs a currency answer — not a real error.
+    if agent == "ExpenseAgent" and result.data.get("needs_currency"):
+        return _NEEDS_CURRENCY.get(lang, _NEEDS_CURRENCY["en"])
 
     # Agent failed — use distinct error message (not the success fallback)
     if not result.success:

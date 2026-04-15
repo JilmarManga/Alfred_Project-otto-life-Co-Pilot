@@ -1,91 +1,206 @@
+import logging
+import os
+import secrets
+from datetime import datetime, timedelta
+from typing import Optional
+
+from app.handlers import onboarding_copy
 from app.models.inbound_message import InboundMessage
+from app.parser.name_city_extractor import extract_name_and_city
+from app.repositories.unknown_message_repository import UnknownMessageRepository
 from app.repositories.user_repository import UserRepository
+from app.services.location_resolver import (
+    resolve_location,
+    STATUS_AMBIGUOUS,
+    STATUS_API_ERROR,
+    STATUS_NOT_FOUND,
+    STATUS_RESOLVED,
+)
 from app.services.whatsapp_sender import send_whatsapp_message
 
+logger = logging.getLogger(__name__)
 
-def handle_onboarding(inbound: InboundMessage, user: dict | None) -> bool:
+STATE_LANGUAGE_PENDING = "language_pending"
+STATE_PROFILE_PENDING = "profile_pending"
+STATE_LOCATION_RETRY = "location_retry"
+STATE_OAUTH_PENDING = "oauth_pending"
+STATE_COMPLETED = "completed"
+
+_CALENDAR_INTENT_KEYWORDS = {
+    "calendar", "calendario", "schedule", "agenda", "reunion", "reunión",
+    "meeting", "event", "evento", "today", "hoy", "tengo", "have", "day",
+    "mañana", "tomorrow", "busy",
+}
+
+
+def _detect_language(text: str) -> Optional[str]:
+    cleaned = (text or "").strip().lower()
+    if "🇬🇧" in text or "🇺🇸" in text:
+        return "en"
+    if "🇨🇴" in text or "🇪🇸" in text or "🇲🇽" in text:
+        return "es"
+    words = set(cleaned.replace(",", " ").split())
+    # Spanish check first — "en español" contains "en" but is clearly Spanish.
+    if words & {"español", "espanol", "spanish", "es", "esp", "sp", "2"}:
+        return "es"
+    if words & {"english", "inglés", "ingles", "en", "eng", "1"}:
+        return "en"
+    return None
+
+
+def _derive_state(user: Optional[dict]) -> str:
+    if not user:
+        return STATE_LANGUAGE_PENDING
+    if user.get("onboarding_state"):
+        return user["onboarding_state"]
+    if user.get("onboarding_completed"):
+        return STATE_COMPLETED
+    if not user.get("language"):
+        return STATE_LANGUAGE_PENDING
+    return STATE_PROFILE_PENDING
+
+
+def _build_authorize_url(state_token: str) -> str:
+    base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+    return f"{base}/auth/google/authorize?state={state_token}"
+
+
+def _send_oauth_link(phone: str, user: dict) -> None:
+    state_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+    UserRepository.set_oauth_state_token(phone, state_token, expires_at)
+    link = _build_authorize_url(state_token)
+    lang = (user.get("language") or "en").lower()
+    name = user.get("name") or ""
+    send_whatsapp_message(phone, onboarding_copy.get("oauth_link", lang, name=name, link=link))
+    UserRepository.mark_oauth_link_sent(phone)
+    UserRepository.set_onboarding_state(phone, STATE_OAUTH_PENDING)
+
+
+def _handle_location_result(phone: str, user: dict, raw_city: str, result) -> None:
+    lang = (user.get("language") or "en").lower()
+
+    if result.status == STATUS_RESOLVED:
+        UserRepository.save_resolved_location(
+            phone,
+            location=result.normalized_name,
+            latitude=result.latitude,
+            longitude=result.longitude,
+            timezone=result.timezone,
+        )
+        updated = UserRepository.get_user(phone) or user
+        _send_oauth_link(phone, updated)
+        return
+
+    if result.status == STATUS_NOT_FOUND:
+        UserRepository.set_onboarding_state(phone, STATE_LOCATION_RETRY)
+        UnknownMessageRepository.log(
+            phone, raw_city, "location_retry_failed",
+            language=lang, onboarding_state=STATE_LOCATION_RETRY,
+        )
+        send_whatsapp_message(phone, onboarding_copy.get("city_not_found", lang))
+        return
+
+    if result.status == STATUS_AMBIGUOUS:
+        UserRepository.set_onboarding_state(phone, STATE_LOCATION_RETRY)
+        send_whatsapp_message(
+            phone, onboarding_copy.get("city_ambiguous", lang, city=raw_city)
+        )
+        return
+
+    UserRepository.create_or_update_user(phone, {
+        "location_raw": raw_city,
+        "location_resolution_status": "pending_retry",
+        "timezone": "UTC",
+    })
+    updated = UserRepository.get_user(phone) or user
+    _send_oauth_link(phone, updated)
+
+
+async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bool:
     """
-    Handles all onboarding states. Returns True if the message was consumed
-    by onboarding (caller should return immediately). Returns False if the
-    user is fully onboarded and normal processing should continue.
+    Onboarding V1.0.0 state machine. Returns True if the message was consumed.
     """
     phone = inbound.user_phone_number
     text = (inbound.text or "").strip()
 
-    # --- State 1: New user — no record in Firestore ---
-    if not user:
-        send_whatsapp_message(phone, "🐙 Hello")
-        send_whatsapp_message(phone, "Español or English?")
-        UserRepository.create_or_update_user(
-            user_phone_number=phone,
-            data={"language": None, "onboarding_completed": False},
-        )
+    if user is None:
+        UserRepository.create_or_update_user(phone, {
+            "onboarding_state": STATE_LANGUAGE_PENDING,
+            "onboarding_completed": False,
+            "language": None,
+        })
+        send_whatsapp_message(phone, onboarding_copy.get("language_prompt"))
         return True
 
-    # --- State 2: User exists but language not set ---
-    if not user.get("language"):
-        words = text.lower().split()
-        if any(w in words for w in ["es", "español", "spanish"]):
-            language = "es"
-        elif any(w in words for w in ["en", "english", "inglés"]):
-            language = "en"
-        else:
-            send_whatsapp_message(phone, "Please reply: Español or English")
+    state = _derive_state(user)
+
+    if state == STATE_LANGUAGE_PENDING:
+        lang = _detect_language(text)
+        if lang is None:
+            asked = user.get("language_asked_count", 0)
+            if asked >= 1:
+                lang = "en"
+            else:
+                UserRepository.create_or_update_user(phone, {"language_asked_count": asked + 1})
+                send_whatsapp_message(phone, onboarding_copy.get("language_retry"))
+                return True
+        UserRepository.create_or_update_user(phone, {"language": lang})
+        UserRepository.set_onboarding_state(phone, STATE_PROFILE_PENDING)
+        send_whatsapp_message(phone, onboarding_copy.get("intro", lang))
+        return True
+
+    if state == STATE_PROFILE_PENDING:
+        lang = (user.get("language") or "en").lower()
+        extraction = await extract_name_and_city(text)
+        name, city = extraction.name, extraction.city
+
+        if not name and not city:
+            send_whatsapp_message(phone, onboarding_copy.get("ask_profile_retry", lang))
             return True
 
-        UserRepository.create_or_update_user(
-            user_phone_number=phone,
-            data={"language": language},
-        )
+        if name:
+            UserRepository.create_or_update_user(phone, {"name": name})
 
-        if language == "es":
-            msg = (
-                "Hola, soy Otto 🐙\n\n"
-                "Para empezar, cuéntame esto:\n"
-                "1. ¿Cómo te llamas?\n"
-                "2. ¿Qué moneda usas normalmente? (COP, USD, NZD, etc.)\n"
-                "3. ¿En qué ciudad/país estás?\n\n"
-                "Respóndeme con todo en un solo mensaje, ej: Otto, USD, New York 😊"
-            )
-        else:
-            msg = (
-                "Hey, I'm Otto 🐙\n\n"
-                "To get started, tell me:\n"
-                "1. What's your name?\n"
-                "2. What currency do you use? (COP, USD, NZD, etc.)\n"
-                "3. What city/country are you in?\n\n"
-                "Reply with everything in one message, e.g: Otto, USD, New York 😊"
-            )
-        send_whatsapp_message(phone, msg)
+        if not city:
+            send_whatsapp_message(phone, onboarding_copy.get("ask_city_only", lang, name=name or ""))
+            return True
+
+        if not name and not user.get("name"):
+            UserRepository.create_or_update_user(phone, {"location_raw": city})
+            send_whatsapp_message(phone, onboarding_copy.get("ask_name_only", lang))
+            return True
+
+        result = resolve_location(city)
+        updated = UserRepository.get_user(phone) or user
+        _handle_location_result(phone, updated, city, result)
         return True
 
-    # --- State 3: Language set but onboarding not completed ---
-    if not user.get("onboarding_completed"):
-        parts = [p.strip() for p in text.split(",")]
-        lang = user.get("language", "es")
-
-        if len(parts) >= 3:
-            name, currency, location = parts[0], parts[1].upper(), parts[2]
-            UserRepository.create_or_update_user(
-                user_phone_number=phone,
-                data={
-                    "name": name,
-                    "preferred_currency": currency,
-                    "location": location,
-                    "language": lang,
-                    "timezone": "America/Bogota",
-                    "onboarding_completed": True,
-                },
-            )
-            msg = f"Perfecto {name} 🙌 Ya estamos listos." if lang == "es" else f"Perfect {name} 🙌 All set."
-            send_whatsapp_message(phone, msg)
-        else:
-            if lang == "es":
-                retry = "Casi 🙌\n\nEnvíamelo en este formato:\nNombre, Moneda, Ciudad\n\nEjemplo:\nOtto, USD, New York 😊"
-            else:
-                retry = "Almost 🙌\n\nSend it in this format:\nName, Currency, City\n\nExample:\nOtto, USD, New York 😊"
-            send_whatsapp_message(phone, retry)
+    if state == STATE_LOCATION_RETRY:
+        result = resolve_location(text)
+        _handle_location_result(phone, user, text, result)
         return True
 
-    # --- State 4: Fully onboarded — let normal flow handle it ---
+    if state == STATE_OAUTH_PENDING:
+        lowered = text.lower()
+        if any(kw in lowered for kw in _CALENDAR_INTENT_KEYWORDS):
+            state_token = user.get("google_oauth_state_token")
+            if not state_token:
+                state_token = secrets.token_urlsafe(32)
+                UserRepository.set_oauth_state_token(
+                    phone, state_token, datetime.utcnow() + timedelta(hours=1)
+                )
+            link = _build_authorize_url(state_token)
+            lang = (user.get("language") or "en").lower()
+            send_whatsapp_message(
+                phone, onboarding_copy.get("oauth_pending_calendar_query", lang, link=link)
+            )
+            UnknownMessageRepository.log(
+                phone, text, "oauth_pending_query",
+                language=lang, onboarding_state=STATE_OAUTH_PENDING,
+                user_context={"name": user.get("name")},
+            )
+            return True
+        return False
+
     return False

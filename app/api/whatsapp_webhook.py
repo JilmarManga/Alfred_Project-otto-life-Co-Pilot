@@ -8,6 +8,7 @@ from app.services.inbound_message_mapper import map_incoming_event_to_inbound_me
 from app.services.whatsapp_sender import send_whatsapp_message
 from app.repositories.user_repository import UserRepository
 from app.handlers.onboarding_handler import handle_onboarding
+from app.handlers.pending_expense_handler import handle_pending_expense
 from app.parser.message_parser import parse_message
 from app.router.deterministic_router import route
 from app.responder.response_formatter import format_response
@@ -52,8 +53,11 @@ async def receive_webhook(request: Request) -> dict:
 
     user = UserRepository.get_user(phone)
 
-    if handle_onboarding(inbound, user):
+    if await handle_onboarding(inbound, user):
         return {"status": "onboarding"}
+
+    if handle_pending_expense(inbound, user):
+        return {"status": "pending_expense"}
 
     # Enrich user dict with phone (Firestore doc.to_dict() doesn't include the doc ID)
     user["phone_number"] = phone

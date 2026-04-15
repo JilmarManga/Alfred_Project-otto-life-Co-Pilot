@@ -134,3 +134,43 @@ def describe_next_event(events):
     time_part = next_event["start"].split("T")[1][:5]
 
     return f"Hoy tienes {title} a las {time_part}"
+
+
+# ---- Per-user OAuth helpers (onboarding V1.0.0) -------------------------
+
+import os
+
+
+def get_calendar_service_for_user(refresh_token: str):
+    """
+    Build a Calendar API service from a per-user refresh token.
+    Used by onboarding callback and any per-user calendar flow.
+    """
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.getenv("GOOGLE_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+        scopes=SCOPES,
+    )
+    creds.refresh(Request())
+    return build("calendar", "v3", credentials=creds)
+
+
+def get_today_events_for_user(refresh_token: str):
+    """Fetch today's events for a specific user by their refresh token."""
+    service = get_calendar_service_for_user(refresh_token)
+
+    now = datetime.datetime.utcnow().isoformat() + "Z"
+    end = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).isoformat() + "Z"
+
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=now,
+        timeMax=end,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    return events_result.get("items", [])

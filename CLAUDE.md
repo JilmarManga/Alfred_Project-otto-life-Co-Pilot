@@ -17,7 +17,7 @@ WhatsApp-based AI personal assistant. Users text naturally ("Pague dos millones 
 
 ## Tech Stack
 
-Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API (OAuth via token.json) · Render
+Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API (OAuth via token.json) · Railway
 
 ---
 
@@ -29,7 +29,8 @@ WhatsApp POST /webhook
   -> route_incoming_message()                [services/message_router.py]
   -> map_incoming_event_to_inbound_message() [services/inbound_message_mapper.py]
   -> UserRepository.get_user()               [repositories/user_repository.py]
-  -> handle_onboarding()                     [handlers/onboarding_handler.py]  ← gate, not an agent
+  -> handle_onboarding()                     [handlers/onboarding_handler.py]  ← async gate, runs BEFORE pipeline
+  -> handle_pending_expense()                [handlers/pending_expense_handler.py]  ← currency follow-up gate
   -> parse_message()          LAYER 1        [parser/message_parser.py]
   -> route()                  LAYER 2        [router/deterministic_router.py]
   -> agent.execute()          LAYER 3        [agents/*.py]
@@ -145,17 +146,34 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 
 ---
 
-## Onboarding Flow (`app/handlers/onboarding_handler.py`)
+## Onboarding Flow V1.0.0 (`app/handlers/onboarding_handler.py`)
 
-Runs as a gate BEFORE the 4-layer pipeline. Returns `True` (consumed) or `False` (proceed to pipeline).
+Runs as an **async** gate BEFORE the 4-layer pipeline. Returns `True` (consumed) or `False` (proceed to pipeline). Onboarding is NOT an agent — it has no `ParsedMessage`, it runs before the parser. All user-facing strings live in `app/handlers/onboarding_copy.py` as bilingual static templates (no LLM in onboarding output — direct WhatsApp sends).
 
-**States:**
-1. No Firestore record → greeting + language question → create user doc
-2. `language` not set → detect "español"/"english" → save language → ask for name/currency/city
-3. `onboarding_completed=False` → parse "Name, Currency, City" format → save profile → complete
-4. `onboarding_completed=True` → return False → normal pipeline runs
+**5-state machine** (stored on `users/{phone}.onboarding_state`):
 
-Onboarding is NOT an agent. It has no `ParsedMessage` — it runs before the parser.
+1. **`language_pending`** — brand-new user → create doc → bilingual prompt with 🇬🇧/🇨🇴 flags. Accepts variations ("english"/"es"/"1"/flag emoji/etc). Spanish check wins first so "en español" → es. Defaults to `en` after one retry.
+2. **`profile_pending`** — ask name + city in one message. Uses `app/parser/name_city_extractor.py` (LLM + regex fallback) to extract. Partial answers (only name / only city) loop back asking for the missing piece.
+3. **`location_retry`** — fired when `location_resolver` returns `not_found` or `ambiguous`. Asks user to clarify (add country, pick country). Reruns resolver on next message.
+4. **`oauth_pending`** — OAuth link sent, waiting for Google callback. Returns `False` for non-calendar messages (Otto still works). Returns `True` for calendar-keyword messages and re-surfaces the link.
+5. **`completed`** — returns False → normal pipeline runs.
+
+**Legacy compat:** users with `onboarding_completed=True` and no `onboarding_state` field are treated as `completed` by `_derive_state()`. No migration needed.
+
+**Currency is NOT asked during onboarding** — deferred to first expense. See Hard Rule #13.
+
+**Location resolution** (`app/services/location_resolver.py`): Google Maps Geocoding + Timezone API. Status values: `resolved | not_found | ambiguous | api_error`. On `api_error` the user is NOT blocked — partial state is saved (`location_raw`, `timezone="UTC"`, `location_resolution_status="pending_retry"`), they proceed to OAuth, and `/cron/oauth-followups` retries geocoding later.
+
+**Google Calendar OAuth** (`app/services/google_oauth.py`, `app/api/oauth_routes.py`):
+- Per-user refresh tokens, Fernet-encrypted on `users/{phone}.google_calendar_refresh_token` (key: `CALENDAR_TOKEN_ENCRYPTION_KEY`)
+- State param is an opaque `secrets.token_urlsafe(32)` stored on the user doc with 1 h expiry, one-time-use (cleared on callback). **Never** the phone number in plaintext.
+- Routes: `GET /auth/google/authorize?state=X`, `GET /auth/google/callback`, `GET /auth/done`
+- Callback exchanges code → refresh_token → encrypt → save → fetch today's events → send WhatsApp confirmation → redirect to `/auth/done`
+- `prompt=consent` forced on the authorize URL so Google always returns a refresh_token
+
+**3h follow-up** (`app/api/cron_routes.py`): `POST /cron/oauth-followups` (secret-protected via `X-Cron-Secret` header / `CRON_SHARED_SECRET` env). Called by external cron every ~15 min. Mints a **fresh** state token + 1 h expiry before sending the reminder (the original link is long dead). Also retries any pending location resolutions. Send-once enforced via `oauth_followup_sent_at`.
+
+**Pending expense currency follow-up** (`app/handlers/pending_expense_handler.py`): sibling gate to onboarding. When `ExpenseAgent` returns `needs_currency=True`, the amount/category is stashed in `user_context_store` (in-memory). The next message is intercepted here, parsed for a currency word (COP/USD/EUR/pesos/dolares/etc), finalized via `ExpenseRepository`, and `preferred_currency` is silently locked in.
 
 ---
 
@@ -163,10 +181,26 @@ Onboarding is NOT an agent. It has no `ParsedMessage` — it runs before the par
 
 **`users`** (doc ID = phone number e.g. `+573001234567`):
 ```
-name, preferred_currency, location, language, timezone,
-onboarding_completed, created_at, updated_at
+# Core identity
+name, language ("es"|"en"), preferred_currency, timezone, location,
+latitude, longitude, location_raw, location_resolution_status,
+
+# Onboarding state (V1.0.0)
+onboarding_state ("language_pending"|"profile_pending"|"location_retry"|"oauth_pending"|"completed"),
+onboarding_completed (legacy mirror, still written),
+language_asked_count,
+
+# Google Calendar OAuth (V1.0.0)
+google_calendar_refresh_token (Fernet-encrypted),
+google_calendar_connected,
+google_oauth_state_token, google_oauth_state_expires_at,
+oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
+
+created_at, updated_at
 ```
-- `location`: full city name for Maps/Weather APIs (e.g. "Bogotá, Colombia", "San Francisco, CA"). Abbreviations like "SF" will fail with OpenWeatherMap.
+- `location`: normalized "City, Region, Country" from Google Maps Geocoding (used by weather/travel APIs). `location_raw` is the user's exact input, kept for research.
+- `preferred_currency`: **not set during onboarding**. First expense with an explicit currency silently locks it in. See Hard Rule #13.
+- `timezone`: IANA tz from Google Timezone API. Falls back to `"UTC"` only when geocoding failed and is pending cron retry.
 - `language`: "es" | "en" — controls all response language
 
 **`expenses`** (auto ID):
@@ -181,6 +215,15 @@ user_message, source, created_at
 - Firestore-backed context store (`app/db/firestore_context_store.py`) — exists but NOT used by agents
 - Agents use in-memory `user_context_store.py` for ephemeral conversational state (resets on server restart — intentional for short-lived follow-up context)
 
+**`unknown_messages`** (auto ID — product research log):
+```
+user_phone_number, raw_message, category, language, onboarding_state,
+parsed_signals, routed_to, user_context, created_at
+```
+- `category`: `"ambiguity" | "location_retry_failed" | "oauth_pending_query" | "error_fallback"`
+- `raw_message` is **never** filtered, cleaned, or normalized — the raw input IS the research value
+- Written from `AmbiguityAgent`, onboarding handler, and cron retries. No TTL.
+
 ---
 
 ## File Structure
@@ -188,10 +231,13 @@ user_message, source, created_at
 ```
 app/
 ├── api/
-│   └── whatsapp_webhook.py          # ~70 lines — ingestion + pipeline orchestration only
+│   ├── whatsapp_webhook.py          # Thin dispatcher: verify, normalize, gates, 4-layer pipeline
+│   ├── oauth_routes.py              # GET /auth/google/authorize|callback|done
+│   └── cron_routes.py               # POST /cron/oauth-followups (secret-protected)
 ├── parser/
 │   ├── message_parser.py            # Layer 1: LLM extraction → ParsedMessage
-│   └── word_number_parser.py        # Utility: "dos millones"→2000000, "50 mil"→50000
+│   ├── word_number_parser.py        # Utility: "dos millones"→2000000, "50 mil"→50000
+│   └── name_city_extractor.py       # LLM + regex: extract name + city from onboarding message
 ├── router/
 │   └── deterministic_router.py      # Layer 2: pure keyword routing, no LLM
 ├── agents/
@@ -201,17 +247,20 @@ app/
 │   ├── travel_agent.py              # Maps API leave-time calculation
 │   ├── summary_agent.py             # Expense aggregation by date range + currency
 │   ├── weather_agent.py             # Weather lookup, city extraction from message
-│   └── ambiguity_agent.py           # Pass-through for unclear messages
+│   └── ambiguity_agent.py           # Pass-through + unknown_messages logger
 ├── responder/
 │   └── response_formatter.py        # Layer 4: LLM formats warm WhatsApp message
 ├── handlers/
-│   └── onboarding_handler.py        # Pre-pipeline gate: new user flow
+│   ├── onboarding_handler.py        # Pre-pipeline gate: 5-state onboarding machine
+│   ├── onboarding_copy.py           # Bilingual static strings for onboarding messages
+│   └── pending_expense_handler.py   # Pre-pipeline gate: currency follow-up for stashed expenses
 ├── repositories/
 │   ├── expense_repository.py        # Firestore CRUD for expenses
-│   └── user_repository.py           # Firestore CRUD for users
+│   ├── user_repository.py           # Firestore CRUD for users + OAuth/onboarding helpers
+│   └── unknown_message_repository.py # Firestore write-only log for product research
 ├── db/
 │   ├── firestore_context_store.py   # Persistent context (Firestore-backed, not used by agents)
-│   └── user_context_store.py        # In-memory context (used by CalendarAgent, TravelAgent)
+│   └── user_context_store.py        # In-memory context (used by CalendarAgent, TravelAgent, pending expense)
 ├── models/
 │   ├── parsed_message.py            # Layer 1 output contract
 │   ├── agent_result.py              # Layer 3 output contract
@@ -219,7 +268,10 @@ app/
 │   ├── inbound_message.py           # Normalized incoming WhatsApp message
 │   └── webhook_event.py             # Raw webhook payload model
 ├── services/
-│   ├── google_calendar.py           # Calendar API + OAuth auto-refresh
+│   ├── google_calendar.py           # Calendar API: global token path + per-user token path
+│   ├── google_oauth.py              # build_authorize_url(), exchange_code() — web OAuth flow
+│   ├── location_resolver.py         # Google Maps Geocoding + Timezone API; status chain
+│   ├── token_crypto.py              # Fernet encrypt/decrypt for stored refresh tokens
 │   ├── maps/maps_service.py         # Google Maps Directions API
 │   ├── weather/weather_service.py   # OpenWeatherMap API (language-aware)
 │   ├── morning_brief/               # Morning brief composer (separate scheduled feature)
@@ -250,17 +302,27 @@ WHATSAPP_ACCESS_TOKEN
 WHATSAPP_PHONE_NUMBER_ID
 WHATSAPP_VERIFY_TOKEN
 
-FIREBASE_CREDENTIALS_PATH          # or credentials/firebase-service-account.json
+FIREBASE_CREDENTIALS                # path to firebase-service-account.json
 
 OPENAI_API_KEY
 
-GOOGLE_MAPS_API_KEY                # Requires Directions API enabled in GCP
+GOOGLE_MAPS_API_KEY                 # Requires Directions + Geocoding + Timezone APIs enabled in GCP
 OPENWEATHER_API_KEY
+
+# Google Calendar OAuth (per-user web flow)
+GOOGLE_OAUTH_CLIENT_ID              # Web OAuth 2.0 client ID from GCP Console
+GOOGLE_OAUTH_CLIENT_SECRET          # Web OAuth 2.0 client secret from GCP Console
+GOOGLE_OAUTH_REDIRECT_URI           # https://<your-domain>/auth/google/callback
+PUBLIC_BASE_URL                     # https://<your-domain>
+CALENDAR_TOKEN_ENCRYPTION_KEY       # Fernet key — generate once, never rotate
+
+# Cron
+CRON_SHARED_SECRET                  # Secret header value for POST /cron/oauth-followups
 
 ENVIRONMENT=development|production
 ```
 
-**Google Calendar OAuth:** credentials stored in `credentials/token.json`. Auto-refreshes on expiry. If `invalid_grant` error appears, run `python3 app/scripts/reauthorize_calendar.py` locally (opens browser for consent).
+**Google Calendar OAuth:** per-user refresh tokens are Fernet-encrypted and stored in Firestore (`users/{phone}.google_calendar_refresh_token`). No `credentials/google_credentials.json` needed at runtime — credentials are read from env vars. Legacy `credentials/token.json` is only used by the global calendar path in `google_calendar.py`.
 
 ---
 
@@ -270,7 +332,7 @@ ENVIRONMENT=development|production
 2. **Never add structured commands for users.** Natural language only.
 3. **Never change Firestore schema** without updating this doc and both repositories.
 4. **Never store secrets in code.** Always `.env`.
-5. **Never make `whatsapp_webhook.py` larger.** Every change should shrink it or keep it at ~70 lines.
+5. **`whatsapp_webhook.py` is a thin dispatcher.** It verifies, normalizes, runs pre-pipeline gates, and orchestrates the 4 layers — nothing else. Any new pre-pipeline concern belongs in its own `handlers/*.py` file called as a gate, not inlined into the webhook.
 6. **Never override user currency** unless the message explicitly states one.
 7. **Never return technical errors to users.** Always a graceful human-friendly fallback.
 8. **New capability = new Agent in `/agents/`.** Never add feature branches inside the webhook.
@@ -278,6 +340,7 @@ ENVIRONMENT=development|production
 10. **LLM only in Layer 1 (parser) and Layer 4 (responder).** Never in router or agents.
 11. **Never put `{variable}` inside `FORMATTING_PROMPT` examples.** Use `[variable]` instead — Python's `.format()` will try to substitute it and crash.
 12. **Travel is checked before Calendar in the router.** Do not reorder. "salir para mi reunión" must route to TravelAgent.
+13. **Never ask the user for currency during onboarding.** Currency is deferred to the first expense — if the message contains an explicit currency word/symbol it's silently locked in as `preferred_currency`; otherwise `ExpenseAgent` returns `needs_currency=True` and the user is prompted once. Hard Rule #6 still applies thereafter.
 
 ---
 

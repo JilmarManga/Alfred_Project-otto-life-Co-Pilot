@@ -29,7 +29,7 @@ class ExpenseAgent(BaseAgent):
             text = (parsed.raw_message or "").lower()
             phone = user.get("phone_number", "")
             logger.info("ExpenseAgent executing — phone=%s raw_amount=%s raw_message=%r", phone, amount, parsed.raw_message)
-            preferred_currency = user.get("preferred_currency", "COP")
+            preferred_currency = user.get("preferred_currency")
 
             # Safety net: parser returned small number but "mil" is in message
             if amount and amount < 1000 and "mil" in text:
@@ -56,14 +56,39 @@ class ExpenseAgent(BaseAgent):
                     error_message="No se pudo extraer el monto del mensaje.",
                 )
 
-            # Currency: default to user preference, override only if explicit
-            currency = preferred_currency
+            # Currency: explicit in message → use and silently lock in; else use preferred;
+            # else stash pending and ask user which currency (onboarding V1.0.0 — no currency question at signup).
+            explicit_currency = None
             if "peso" in text or "cop" in text or "colombian" in text:
-                currency = "COP"
+                explicit_currency = "COP"
             elif "dolar" in text or "usd" in text or "dollar" in text:
-                currency = "USD"
+                explicit_currency = "USD"
             elif parsed.currency:
-                currency = parsed.currency
+                explicit_currency = parsed.currency
+
+            if explicit_currency:
+                currency = explicit_currency
+                if not preferred_currency:
+                    try:
+                        from app.repositories.user_repository import UserRepository
+                        UserRepository.create_or_update_user(phone, {"preferred_currency": currency})
+                    except Exception as e:
+                        logger.warning("Failed to silently save preferred_currency: %s", e)
+            elif preferred_currency:
+                currency = preferred_currency
+            else:
+                from app.db.user_context_store import update_user_context
+                update_user_context(phone, "pending_expense", {
+                    "amount": amount,
+                    "category": parsed.category_hint or "other",
+                    "raw_message": parsed.raw_message,
+                })
+                return AgentResult(
+                    agent_name="ExpenseAgent",
+                    success=False,
+                    data={"needs_currency": True, "amount": amount},
+                    error_message="needs_currency",
+                )
 
             # Category from hint or keyword scan
             VALID_CATEGORIES = {"food", "transport", "shopping", "health", "other"}
