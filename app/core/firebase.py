@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 from pathlib import Path
 
@@ -5,29 +7,33 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 
-def get_firebase_credentials_path() -> str:
-    # 1. Try environment variable first
-    env_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
-    if env_path:
-        return env_path
+def _get_firebase_credentials() -> credentials.Certificate:
+    # 1. Base64-encoded JSON via env var (production / Railway)
+    b64 = os.getenv("FIREBASE_CREDENTIALS_BASE64")
+    if b64:
+        cred_dict = json.loads(base64.b64decode(b64).decode("utf-8"))
+        return credentials.Certificate(cred_dict)
 
-    # 2. Fallback for local development
+    # 2. File path via env var
+    env_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
+    if env_path and Path(env_path).exists():
+        return credentials.Certificate(env_path)
+
+    # 3. Fallback for local development
     project_root = Path(__file__).resolve().parents[2]
     local_path = project_root / "credentials" / "firebase-service-account.json"
-
     if local_path.exists():
-        return str(local_path)
+        return credentials.Certificate(str(local_path))
 
     raise ValueError(
         "Firebase credentials not found. "
-        "Set FIREBASE_CREDENTIALS_PATH or place the file at "
-        "'credentials/firebase-service-account.json'"
+        "Set FIREBASE_CREDENTIALS_BASE64, FIREBASE_CREDENTIALS_PATH, "
+        "or place the file at 'credentials/firebase-service-account.json'"
     )
 
 
 if not firebase_admin._apps:
-    cred_path = get_firebase_credentials_path()
-    cred = credentials.Certificate(cred_path)
+    cred = _get_firebase_credentials()
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
