@@ -29,16 +29,14 @@ def _build_authorize_url(state_token: str) -> str:
     return f"{base}/auth/google/authorize?state={state_token}"
 
 
-@router.post("/cron/oauth-followups")
-async def oauth_followups(x_cron_secret: str = Header(default="")):
+def run_cron_job() -> dict:
     """
-    Called by the external cron every ~15 minutes. Does two things:
+    Core cron logic — called by the internal scheduler every 15 min,
+    and also by the HTTP route for manual triggers. Does two things:
       1. Sends the 3h OAuth reminder to users who haven't connected yet,
          minting a fresh state token so the link is actually clickable.
       2. Retries location resolution for users whose geocoding failed during onboarding.
     """
-    _require_secret(x_cron_secret)
-
     followups_sent = 0
     locations_resolved = 0
 
@@ -82,8 +80,16 @@ async def oauth_followups(x_cron_secret: str = Header(default="")):
         except Exception as exc:
             logger.exception("Location retry failed for %s: %s", phone, exc)
 
+    logger.info("Cron job complete — followups_sent=%d locations_resolved=%d", followups_sent, locations_resolved)
     return {
         "status": "ok",
         "followups_sent": followups_sent,
         "locations_resolved": locations_resolved,
     }
+
+
+@router.post("/cron/oauth-followups")
+async def oauth_followups(x_cron_secret: str = Header(default="")):
+    """Manual trigger — protected by secret header. Calls the same logic as the internal scheduler."""
+    _require_secret(x_cron_secret)
+    return run_cron_job()
