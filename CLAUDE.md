@@ -17,7 +17,7 @@ WhatsApp-based AI personal assistant. Users text naturally ("Pague dos millones 
 
 ## Tech Stack
 
-Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API (OAuth via token.json) · Railway
+Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API (per-user OAuth, Fernet-encrypted tokens) · Railway (NIXPACKS)
 
 ---
 
@@ -168,6 +168,7 @@ Runs as an **async** gate BEFORE the 4-layer pipeline. Returns `True` (consumed)
 - Per-user refresh tokens, Fernet-encrypted on `users/{phone}.google_calendar_refresh_token` (key: `CALENDAR_TOKEN_ENCRYPTION_KEY`)
 - State param is an opaque `secrets.token_urlsafe(32)` stored on the user doc with 1 h expiry, one-time-use (cleared on callback). **Never** the phone number in plaintext.
 - Routes: `GET /auth/google/authorize?state=X`, `GET /auth/google/callback`, `GET /auth/done`
+- **PKCE flow:** `build_authorize_url()` returns `(url, code_verifier)`. The `code_verifier` is stored in Firestore (`users/{phone}.google_oauth_code_verifier`) at the `/auth/google/authorize` step and passed to `exchange_code()` at the `/auth/google/callback` step. Without this, `google-auth-oauthlib` raises `(invalid_grant) Missing code verifier`.
 - Callback exchanges code → refresh_token → encrypt → save → fetch today's events → send WhatsApp confirmation → redirect to `/auth/done`
 - `prompt=consent` forced on the authorize URL so Google always returns a refresh_token
 
@@ -194,6 +195,7 @@ language_asked_count,
 google_calendar_refresh_token (Fernet-encrypted),
 google_calendar_connected,
 google_oauth_state_token, google_oauth_state_expires_at,
+google_oauth_code_verifier,          # PKCE verifier — written at /authorize, read at /callback
 oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
 
 created_at, updated_at
@@ -302,7 +304,8 @@ WHATSAPP_ACCESS_TOKEN
 WHATSAPP_PHONE_NUMBER_ID
 WHATSAPP_VERIFY_TOKEN
 
-FIREBASE_CREDENTIALS                # path to firebase-service-account.json
+FIREBASE_CREDENTIALS_JSON           # Raw JSON string of firebase-service-account.json (production/Railway)
+                                    # Fallback: FIREBASE_CREDENTIALS_PATH (file path) or credentials/firebase-service-account.json (local)
 
 OPENAI_API_KEY
 
@@ -322,7 +325,9 @@ CRON_SHARED_SECRET                  # Secret header value for POST /cron/oauth-f
 ENVIRONMENT=development|production
 ```
 
-**Google Calendar OAuth:** per-user refresh tokens are Fernet-encrypted and stored in Firestore (`users/{phone}.google_calendar_refresh_token`). No `credentials/google_credentials.json` needed at runtime — credentials are read from env vars. Legacy `credentials/token.json` is only used by the global calendar path in `google_calendar.py`.
+**Google Calendar OAuth:** per-user refresh tokens are Fernet-encrypted and stored in Firestore (`users/{phone}.google_calendar_refresh_token`). No `credentials/google_credentials.json` needed at runtime — credentials are read from env vars. The legacy global `get_today_events()` / `get_calendar_service()` (reading `credentials/token.json`) is dead on production — **always use `get_today_events_for_user(refresh_token)`**.
+
+**Firebase on Railway:** use `FIREBASE_CREDENTIALS_JSON` (raw JSON string). `app/core/firebase.py` writes it to a temp file at startup. Do not try to mount a secret file — Railway has no secret file feature.
 
 ---
 
@@ -341,6 +346,29 @@ ENVIRONMENT=development|production
 11. **Never put `{variable}` inside `FORMATTING_PROMPT` examples.** Use `[variable]` instead — Python's `.format()` will try to substitute it and crash.
 12. **Travel is checked before Calendar in the router.** Do not reorder. "salir para mi reunión" must route to TravelAgent.
 13. **Never ask the user for currency during onboarding.** Currency is deferred to the first expense — if the message contains an explicit currency word/symbol it's silently locked in as `preferred_currency`; otherwise `ExpenseAgent` returns `needs_currency=True` and the user is prompted once. Hard Rule #6 still applies thereafter.
+14. **CalendarAgent and TravelAgent must always use the per-user refresh token.** Never call `get_today_events()` (legacy global path). Always decrypt `user["google_calendar_refresh_token"]` with `token_crypto.decrypt()` and call `get_today_events_for_user(refresh_token)`. Return `error_message="calendar_not_connected"` if the token is missing.
+15. **OAuth PKCE verifier must be stored and retrieved.** `build_authorize_url()` returns `(url, code_verifier)`. Store `code_verifier` in Firestore at `/auth/google/authorize` time. Pass it to `exchange_code(code_verifier=...)` at `/auth/google/callback` time. Omitting this causes `(invalid_grant) Missing code verifier` from Google.
+
+---
+
+## Railway Deployment
+
+**Live URL:** `https://alfredproject-otto-life-co-pilot-production.up.railway.app`
+
+**Builder:** NIXPACKS (configured in `railway.json`). Do not use RAILPACK — it caused proxy routing issues.
+
+**Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- `--host 0.0.0.0` is mandatory — `127.0.0.1` will cause 502s.
+- `$PORT` is injected by Railway. Do NOT hardcode it or set `PORT` manually in Railway Variables.
+
+**Networking:** In Railway Settings → Networking, the public domain port must match the port the app binds to (currently **8080**). A mismatch (e.g. domain → 8000, app → 8080) causes `connection refused` on every external request while internal healthchecks still pass.
+
+**Known footguns:**
+- `multiRegionConfig` in `railway.json` causes edge proxy misrouting unless you're on an Enterprise plan — keep it out.
+- `runtime: "V2"` combined with multi-region caused 502s — removed.
+- `dotenv==0.9.9` and `python-dotenv==1.0.1` conflict in the same `requirements.txt` — only keep `python-dotenv`.
+
+**Cron:** APScheduler runs `run_cron_job` every 15 minutes in-process (no external cron service). Defined in `app/main.py` lifespan. `run_cron_job` is synchronous — if it ever starts doing heavy work, move it to a thread pool executor to avoid blocking the event loop.
 
 ---
 
