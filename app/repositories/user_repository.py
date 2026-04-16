@@ -59,16 +59,17 @@ class UserRepository:
 
     @staticmethod
     def set_oauth_state_token(
-        user_phone_number: str, state_token: str, expires_at: datetime
+        user_phone_number: str, state_token: str, expires_at: datetime,
+        code_verifier: str = None,
     ) -> None:
-        """Store an opaque single-use OAuth state token with expiry."""
-        UserRepository.create_or_update_user(
-            user_phone_number,
-            {
-                "google_oauth_state_token": state_token,
-                "google_oauth_state_expires_at": expires_at,
-            },
-        )
+        """Store an opaque single-use OAuth state token with expiry and PKCE verifier."""
+        data = {
+            "google_oauth_state_token": state_token,
+            "google_oauth_state_expires_at": expires_at,
+        }
+        if code_verifier:
+            data["google_oauth_code_verifier"] = code_verifier
+        UserRepository.create_or_update_user(user_phone_number, data)
 
     @staticmethod
     def get_user_by_oauth_state(state_token: str) -> Optional[Dict]:

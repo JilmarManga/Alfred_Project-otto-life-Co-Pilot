@@ -44,11 +44,24 @@ async def authorize(state: str = ""):
     """
     if not state:
         return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    user = UserRepository.get_user_by_oauth_state(state)
+    if not user:
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
     try:
-        url = google_oauth.build_authorize_url(state_token=state)
+        url, code_verifier = google_oauth.build_authorize_url(state_token=state)
     except Exception as exc:
         logger.exception("Failed to build Google authorize URL: %s", exc)
         return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    if code_verifier:
+        UserRepository.set_oauth_state_token(
+            user["phone"], state,
+            user.get("google_oauth_state_expires_at"),
+            code_verifier=code_verifier,
+        )
+
     return RedirectResponse(url)
 
 
@@ -76,7 +89,8 @@ async def callback(request: Request):
     phone = user["phone"]
 
     try:
-        refresh_token = google_oauth.exchange_code(code=code, state_token=state)
+        code_verifier = user.get("google_oauth_code_verifier")
+        refresh_token = google_oauth.exchange_code(code=code, state_token=state, code_verifier=code_verifier)
     except Exception as exc:
         logger.exception("OAuth code exchange failed for %s: %s", phone, exc)
         send_whatsapp_message(

@@ -40,11 +40,11 @@ def _build_flow(state: Optional[str] = None) -> Flow:
     return flow
 
 
-def build_authorize_url(state_token: str) -> str:
+def build_authorize_url(state_token: str) -> tuple[str, Optional[str]]:
     """
     Build the Google OAuth consent URL for a given state token.
-    Forces prompt=consent so Google always returns a refresh_token,
-    even for users who've previously authorized the app.
+    Returns (url, code_verifier) — code_verifier must be stored and
+    passed back during exchange_code() for PKCE validation.
     """
     flow = _build_flow(state=state_token)
     url, _ = flow.authorization_url(
@@ -52,16 +52,16 @@ def build_authorize_url(state_token: str) -> str:
         include_granted_scopes="true",
         prompt="consent",
     )
-    return url
+    return url, flow.code_verifier
 
 
-def exchange_code(code: str, state_token: Optional[str] = None) -> str:
+def exchange_code(code: str, state_token: Optional[str] = None, code_verifier: Optional[str] = None) -> str:
     """
     Exchange an OAuth code for credentials and return the refresh_token.
     Raises RuntimeError if Google didn't return a refresh_token.
     """
     flow = _build_flow(state=state_token)
-    flow.fetch_token(code=code)
+    flow.fetch_token(code=code, code_verifier=code_verifier)
     creds = flow.credentials
     if not creds.refresh_token:
         raise RuntimeError("Google OAuth response did not include a refresh_token")
