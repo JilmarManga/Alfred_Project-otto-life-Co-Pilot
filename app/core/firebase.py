@@ -1,6 +1,6 @@
 import base64
-import json
 import os
+import tempfile
 from pathlib import Path
 
 import firebase_admin
@@ -11,8 +11,12 @@ def _get_firebase_credentials() -> credentials.Certificate:
     # 1. Base64-encoded JSON via env var (production / Railway)
     b64 = os.getenv("FIREBASE_CREDENTIALS_BASE64")
     if b64:
-        cred_dict = json.loads(base64.b64decode(b64).decode("utf-8"))
-        return credentials.Certificate(cred_dict)
+        json_bytes = base64.b64decode(b64)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.write(json_bytes)
+        tmp.flush()
+        tmp.close()
+        return credentials.Certificate(tmp.name)
 
     # 2. File path via env var
     env_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
