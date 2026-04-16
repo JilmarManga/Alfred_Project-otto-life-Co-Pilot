@@ -1,4 +1,4 @@
-import base64
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -8,12 +8,12 @@ from firebase_admin import credentials, firestore
 
 
 def _get_firebase_credentials() -> credentials.Certificate:
-    # 1. Base64-encoded JSON via env var (production / Railway)
-    b64 = os.getenv("FIREBASE_CREDENTIALS_BASE64")
-    if b64:
-        json_bytes = base64.b64decode(b64)
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-        tmp.write(json_bytes)
+    # 1. Raw JSON string via env var (production / Railway)
+    raw_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+    if raw_json:
+        cred_dict = json.loads(raw_json)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json", mode="w")
+        json.dump(cred_dict, tmp)
         tmp.flush()
         tmp.close()
         return credentials.Certificate(tmp.name)
@@ -31,7 +31,7 @@ def _get_firebase_credentials() -> credentials.Certificate:
 
     raise ValueError(
         "Firebase credentials not found. "
-        "Set FIREBASE_CREDENTIALS_BASE64, FIREBASE_CREDENTIALS_PATH, "
+        "Set FIREBASE_CREDENTIALS_JSON, FIREBASE_CREDENTIALS_PATH, "
         "or place the file at 'credentials/firebase-service-account.json'"
     )
 
