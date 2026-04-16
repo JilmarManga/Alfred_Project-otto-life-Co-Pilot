@@ -14,24 +14,58 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-_EXPIRED_PAGE = """
+_PAGE_STYLE = """
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+       background:#f5f7fa;color:#1a1a2e;min-height:100vh;
+       display:flex;align-items:center;justify-content:center;padding:24px}
+  .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);
+        max-width:420px;width:100%;padding:48px 32px;text-align:center}
+  .icon{font-size:56px;margin-bottom:16px}
+  /* Replace this div with <img src="..." alt="Otto" class="logo"> when logo is ready */
+  .brand{font-size:18px;font-weight:600;color:#6c6c80;letter-spacing:.5px;margin-bottom:24px}
+  .brand span{font-size:22px;vertical-align:middle}
+  h1{font-size:24px;font-weight:700;color:#1a1a2e;margin-bottom:8px}
+  .sub{font-size:15px;color:#6c6c80;line-height:1.5;margin-bottom:32px}
+  .cta{display:inline-block;background:#25D366;color:#fff;font-size:15px;font-weight:600;
+       text-decoration:none;padding:12px 28px;border-radius:28px;transition:background .2s}
+  .cta:hover{background:#1ebe5a}
+  .cta-muted{display:inline-block;color:#6c6c80;font-size:14px;margin-top:16px}
+  .accent-green .icon{color:#4CAF50}
+  .accent-amber .icon{color:#F5A623}
+</style>
+"""
+
+_EXPIRED_PAGE = f"""
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Link expired</title>
+<html lang="en"><head><meta charset="utf-8"><title>Link expired — Otto</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:-apple-system,Segoe UI,sans-serif;max-width:480px;margin:80px auto;padding:0 24px;color:#222;text-align:center}</style>
+{_PAGE_STYLE}
 </head><body>
-<h2>This link has expired</h2>
-<p>Text Otto again to get a fresh one.</p>
+<div class="card accent-amber">
+  <div class="icon">⚠️</div>
+  <div class="brand">Otto <span>🐙</span></div>
+  <h1>This link has expired</h1>
+  <p class="sub">No worries — just send Otto a message on WhatsApp to get a fresh one.</p>
+  <a class="cta" href="https://wa.me/" target="_blank">Open WhatsApp</a>
+</div>
 </body></html>
 """
 
-_DONE_PAGE = """
+_DONE_PAGE = f"""
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>All done</title>
+<html lang="en"><head><meta charset="utf-8"><title>You're all set — Otto</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:-apple-system,Segoe UI,sans-serif;max-width:480px;margin:80px auto;padding:0 24px;color:#222;text-align:center}</style>
+{_PAGE_STYLE}
 </head><body>
-<h2>All done — go back to WhatsApp</h2>
+<div class="card accent-green">
+  <div class="icon">✅</div>
+  <div class="brand">Otto <span>🐙</span></div>
+  <h1>You're all set!</h1>
+  <p class="sub">Your calendar is connected. Otto will take it from here — your first briefing arrives tomorrow morning.</p>
+  <a class="cta" href="https://wa.me/" target="_blank">Back to WhatsApp</a>
+</div>
 </body></html>
 """
 

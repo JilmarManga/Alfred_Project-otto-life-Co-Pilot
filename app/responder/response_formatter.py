@@ -63,6 +63,7 @@ _FALLBACKS = {
     "TravelAgent":   {"es": "Te digo cuándo salir.", "en": "I'll tell you when to leave."},
     "WeatherAgent":  {"es": "Aquí el clima.", "en": "Here's the weather."},
     "AmbiguityAgent":{"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
+    "GreetingAgent": {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
 }
 
 _NEEDS_CURRENCY = {
@@ -77,6 +78,7 @@ _ERROR_MESSAGES = {
     "CalendarAgent": {"es": "No pude acceder a tu agenda. Intenta de nuevo 🙏", "en": "Couldn't access your calendar. Try again 🙏"},
     "TravelAgent":   {"es": "No pude calcular el viaje. Intenta de nuevo 🙏", "en": "Couldn't calculate travel time. Try again 🙏"},
     "WeatherAgent":  {"es": "No pude obtener el clima. Intenta de nuevo 🙏", "en": "Couldn't get the weather. Try again 🙏"},
+    "GreetingAgent": {"es": "¡Hola! 🐙", "en": "Hey! 🐙"},
 }
 
 
@@ -89,6 +91,10 @@ def format_response(result: AgentResult, user: dict) -> str:
     lang_name = "Spanish" if lang == "es" else "English"
     name = user.get("name", "")
     agent = result.agent_name
+
+    # Greeting/gratitude — hardcoded responses, no LLM call needed.
+    if agent == "GreetingAgent" and result.success:
+        return result.data.get("response", _FALLBACKS.get("GreetingAgent", {}).get(lang, "🐙"))
 
     # Special case: expense needs a currency answer — not a real error.
     if agent == "ExpenseAgent" and result.data.get("needs_currency"):

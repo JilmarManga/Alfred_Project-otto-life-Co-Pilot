@@ -76,15 +76,21 @@ if signal in WEATHER_KEYWORDS:      -> WeatherAgent
 if signal in SUMMARY_KEYWORDS:      -> SummaryAgent     # specific money words beat generic calendar words like "have"
 if signal in CALENDAR_KEYWORDS:     -> CalendarAgent
 if parsed.event_reference is not None: -> CalendarAgent # ordinal/next follow-ups with no keyword
+if signal in GREETING_KEYWORDS:     -> GreetingAgent    # social signals after all functional agents
+if signal in GRATITUDE_KEYWORDS:    -> GreetingAgent
 else:                               -> AmbiguityAgent
 ```
 
 **Keyword sets:**
 ```python
-CALENDAR_KEYWORDS = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS  = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
-SUMMARY_KEYWORDS  = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses"}
-TRAVEL_KEYWORDS   = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
+CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
+WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
+SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
+                       "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
+TRAVEL_KEYWORDS    = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
+GREETING_KEYWORDS  = {"hola", "hello", "hey", "buenos días", "buenos dias", "good morning", "buenas tardes",
+                       "good afternoon", "buenas noches", "good evening", "buenas", "que tal", "qué tal"}
+GRATITUDE_KEYWORDS = {"gracias", "thanks", "thank you", "thankss", "thanx", "grax", "tks"}
 ```
 
 **Important design decisions:**
@@ -92,6 +98,8 @@ TRAVEL_KEYWORDS   = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffi
 - Summary is checked before Calendar: `"have"` + `"spent"` → SummaryAgent wins (specific money words beat generic calendar words).
 - Travel is checked before Calendar so "a qué hora debo salir para mi reunión?" routes to TravelAgent, not CalendarAgent.
 - `event_reference` routing catches ordinal follow-ups ("Y el segundo?") that contain no keyword.
+- Greeting and gratitude are checked AFTER all functional agents so "hola, cuanto gaste hoy?" routes to SummaryAgent, not GreetingAgent.
+- "hi" is intentionally NOT in `GREETING_KEYWORDS` — it's a substring of "this", "children", etc. Similarly "ty" is excluded from `GRATITUDE_KEYWORDS`.
 - These same keyword sets are mirrored in `parser/message_parser.py` for signal scanning.
 
 **Forbidden:** calling LLM, calling Firestore, confidence scores, making routing assumptions
@@ -113,6 +121,7 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 | `TravelAgent` | `travel_agent.py` | Find next event, call Maps API for leave time and duration |
 | `SummaryAgent` | `summary_agent.py` | Query expenses by date range, aggregate by currency |
 | `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if user specifies one |
+| `GreetingAgent` | `greeting_agent.py` | Hardcoded greeting/gratitude responses, no LLM, no Firestore |
 | `AmbiguityAgent` | `ambiguity_agent.py` | Pass raw message to responder to generate a clarifying question |
 
 **Key behaviors:**
@@ -120,6 +129,7 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 - `WeatherAgent`: if user says "clima en Bogota", extracts "Bogota" and uses it instead of stored location. Returns `city_not_found: True` in data when OpenWeatherMap returns 404 — responder formats a helpful retry message.
 - `SummaryAgent`: handles "hoy", "esta semana", "semana pasada", "este mes", "mes pasado", "este año". Default is current week (Monday–now).
 - `CalendarAgent` + `TravelAgent`: use in-memory `user_context_store` for short-lived conversational context (today's events, last referenced event for "y el segundo?" follow-ups). This is intentional — context is ephemeral.
+- `GreetingAgent`: hardcoded responses (no LLM). Picks randomly from 3-4 options per type (greeting/gratitude) per language. Greeting responses include user name. Responder short-circuits — returns `data["response"]` directly, no LLM formatting call.
 
 **Forbidden:** calling LLM, formatting user-facing text, knowing about WhatsApp
 
@@ -128,9 +138,10 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 ### Layer 4 — Responder (`app/responder/response_formatter.py`)
 **Responsibility:** Convert `AgentResult` → warm WhatsApp message in the user's language.
 
-**Two response paths:**
+**Three response paths:**
+- `GreetingAgent` + `result.success=True` → short-circuits with `data["response"]` (hardcoded, no LLM call).
 - `result.success=False` → returns from `_ERROR_MESSAGES` dict (no LLM call). Error message is distinct from success fallback so failures are visible to the user.
-- `result.success=True` → calls GPT-4o-mini with `FORMATTING_PROMPT`; falls back to `_FALLBACKS` dict if LLM fails.
+- `result.success=True` (all other agents) → calls GPT-4o-mini with `FORMATTING_PROMPT`; falls back to `_FALLBACKS` dict if LLM fails.
 
 **Language enforcement:** Prompt says "You MUST respond in {lang_name} ONLY" and user_content repeats it. Language comes from `user["language"]` (Firestore).
 
@@ -249,6 +260,7 @@ app/
 │   ├── travel_agent.py              # Maps API leave-time calculation
 │   ├── summary_agent.py             # Expense aggregation by date range + currency
 │   ├── weather_agent.py             # Weather lookup, city extraction from message
+│   ├── greeting_agent.py            # Hardcoded greeting/gratitude responses (no LLM)
 │   └── ambiguity_agent.py           # Pass-through + unknown_messages logger
 ├── responder/
 │   └── response_formatter.py        # Layer 4: LLM formats warm WhatsApp message

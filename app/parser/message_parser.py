@@ -50,10 +50,15 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 GPT_MODEL = "gpt-4o-mini"
 
 # Deterministic signal keyword sets (from CLAUDE.md)
-CALENDAR_KEYWORDS = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS  = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
-SUMMARY_KEYWORDS  = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses"}
-TRAVEL_KEYWORDS   = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
+CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
+WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
+SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
+                       "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
+TRAVEL_KEYWORDS    = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
+GREETING_KEYWORDS  = {"hola", "hello", "hey", "buenos días", "buenos dias",
+                       "good morning", "buenas tardes", "good afternoon",
+                       "buenas noches", "good evening", "buenas", "que tal", "qué tal"}
+GRATITUDE_KEYWORDS = {"gracias", "thanks", "thank you", "thankss", "thanx", "grax", "tks"}
 
 EXTRACTION_PROMPT = """You are a data extractor for a personal finance assistant.
 Given a user message in any language (primarily Spanish and English),
@@ -78,7 +83,7 @@ def _scan_signals(text: str) -> list[str]:
     """Deterministic keyword scan — no LLM involved."""
     text_lower = text.lower()
     found = []
-    for kw in CALENDAR_KEYWORDS | WEATHER_KEYWORDS | SUMMARY_KEYWORDS | TRAVEL_KEYWORDS:
+    for kw in CALENDAR_KEYWORDS | WEATHER_KEYWORDS | SUMMARY_KEYWORDS | TRAVEL_KEYWORDS | GREETING_KEYWORDS | GRATITUDE_KEYWORDS:
         if kw in text_lower:
             found.append(kw)
     return found
