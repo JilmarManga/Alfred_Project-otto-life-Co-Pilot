@@ -2,9 +2,10 @@ from datetime import datetime
 from app.agents.base_agent import BaseAgent
 from app.models.parsed_message import ParsedMessage
 from app.models.agent_result import AgentResult
-from app.services.google_calendar import get_today_events, normalize_events
+from app.services.google_calendar import get_today_events_for_user, normalize_events
 from app.services.maps.maps_service import estimate_travel_info
-from app.db.user_context_store import get_user_context, update_user_context  # swapped for Firestore in Phase 4
+from app.services.token_crypto import decrypt
+from app.db.user_context_store import get_user_context, update_user_context
 
 
 class TravelAgent(BaseAgent):
@@ -15,6 +16,15 @@ class TravelAgent(BaseAgent):
             user_origin = user.get("location", "Bogotá, Colombia")
             context = get_user_context(phone)
 
+            encrypted = user.get("google_calendar_refresh_token")
+            if not encrypted:
+                return AgentResult(
+                    agent_name="TravelAgent",
+                    success=False,
+                    error_message="calendar_not_connected",
+                )
+            refresh_token = decrypt(encrypted)
+
             # 1. Prefer last referenced event (best UX — user already mentioned it)
             selected_event = context.get("last_referenced_event")
 
@@ -23,7 +33,7 @@ class TravelAgent(BaseAgent):
                 events = context.get("today_events", [])
 
                 if not events:
-                    events_raw = get_today_events()
+                    events_raw = get_today_events_for_user(refresh_token)
                     events = normalize_events(events_raw) if events_raw else []
                     update_user_context(phone, "today_events", events)
 

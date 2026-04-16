@@ -150,8 +150,8 @@ def get_calendar_service_for_user(refresh_token: str):
         token=None,
         refresh_token=refresh_token,
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+        client_id=os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
         scopes=SCOPES,
     )
     creds.refresh(Request())
