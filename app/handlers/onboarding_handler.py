@@ -147,6 +147,7 @@ async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bo
                 return True
         UserRepository.create_or_update_user(phone, {"language": lang})
         UserRepository.set_onboarding_state(phone, STATE_PROFILE_PENDING)
+        send_whatsapp_message(phone, onboarding_copy.get("beta_welcome", lang))
         send_whatsapp_message(phone, onboarding_copy.get("intro", lang))
         return True
 
