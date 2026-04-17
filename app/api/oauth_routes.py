@@ -23,7 +23,7 @@ _PAGE_STYLE = """
   .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);
         max-width:420px;width:100%;padding:48px 32px;text-align:center}
   .icon{font-size:56px;margin-bottom:16px}
-  .logo{width:160px;height:160px;object-fit:contain;margin-bottom:4px}
+  .logo{width:120px;height:120px;object-fit:contain;margin-bottom:4px}
   .brand{font-size:24px;font-weight:700;color:#d4006c;letter-spacing:.5px;margin-bottom:24px}
   h1{font-size:24px;font-weight:700;color:#1a1a2e;margin-bottom:8px}
   .sub{font-size:15px;color:#6c6c80;line-height:1.5;margin-bottom:32px}
