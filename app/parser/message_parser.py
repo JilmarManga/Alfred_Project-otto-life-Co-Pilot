@@ -65,7 +65,7 @@ CREATE_KEYWORDS    = {
     "agenda una", "agenda un", "agenda el", "agenda mi",
     "crea una", "crea un", "crea el", "crea mi", "crea la",
     "crear una", "crear un", "crear el", "crear mi", "crear la",
-    "agrega una", "agrega un", "agrega el", "agrega mi",
+    "agrega", "agrega una", "agrega un", "agrega el", "agrega mi",
     "agregar al calendario", "añade al calendario", "añadir al calendario",
     "programa una", "programa un", "programar una", "programar un",
     "nueva reunión", "nuevo evento",
@@ -119,6 +119,9 @@ event to add to their calendar (e.g. "meeting with John tomorrow at 3pm at the o
 - event_start: ISO 8601 datetime with tz offset (e.g. "2026-04-22T14:00:00-05:00"),
   or null. Use the "Today" and "Timezone" context (if provided) to resolve relative
   dates like "mañana", "next Wednesday", "el viernes" to absolute dates.
+  IMPORTANT: A bare day name ("viernes", "lunes", "friday", "monday", etc.) always
+  means the NEXT upcoming occurrence of that day from Today's date. Never pick a
+  past date for a day name.
 - event_location: the place, or null
 - event_duration_minutes: integer minutes if user specifies duration, or null
 

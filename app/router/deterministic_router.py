@@ -24,7 +24,7 @@ CREATE_KEYWORDS    = {
     "agenda una", "agenda un", "agenda el", "agenda mi",
     "crea una", "crea un", "crea el", "crea mi", "crea la",
     "crear una", "crear un", "crear el", "crear mi", "crear la",
-    "agrega una", "agrega un", "agrega el", "agrega mi",
+    "agrega", "agrega una", "agrega un", "agrega el", "agrega mi",
     "agregar al calendario", "añade al calendario", "añadir al calendario",
     "programa una", "programa un", "programar una", "programar un",
     "nueva reunión", "nuevo evento",

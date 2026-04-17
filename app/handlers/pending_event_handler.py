@@ -25,6 +25,7 @@ _AFFIRMATIVE_KEYWORDS = {
     # Spanish
     "sí", "si", "sii", "siii", "dale", "hazlo", "hagámoslo", "hagamoslo",
     "créalo", "crealo", "agéndalo", "agendalo", "crea", "crear", "agenda", "agendar",
+    "agrega", "agregar", "añade", "añadir",
     "ok", "okay", "vale", "listo", "claro", "por favor",
     # English
     "yes", "yep", "yeah", "sure", "create", "create it", "schedule it",
