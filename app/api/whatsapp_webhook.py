@@ -1,5 +1,7 @@
 import os
 import logging
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from app.models.webhook_event import IncomingMessageEvent
@@ -9,9 +11,25 @@ from app.services.whatsapp_sender import send_whatsapp_message
 from app.repositories.user_repository import UserRepository
 from app.handlers.onboarding_handler import handle_onboarding
 from app.handlers.pending_expense_handler import handle_pending_expense
+from app.handlers.pending_event_handler import handle_pending_event
 from app.parser.message_parser import parse_message
 from app.router.deterministic_router import route
 from app.responder.response_formatter import format_response
+
+
+def _build_parser_context(user: dict) -> dict:
+    """Today's date in the user's local timezone + tz name — used by the LLM
+    to resolve relative dates like 'next Wednesday' to absolute ISO."""
+    tz_name = user.get("timezone") or "UTC"
+    try:
+        tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+        tz_name = "UTC"
+    return {
+        "today": datetime.now(tz).date().isoformat(),
+        "tz": tz_name,
+    }
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +77,25 @@ async def receive_webhook(request: Request) -> dict:
     if handle_pending_expense(inbound, user):
         return {"status": "pending_expense"}
 
+    if handle_pending_event(inbound, user):
+        return {"status": "pending_event"}
+
     # Enrich user dict with phone (Firestore doc.to_dict() doesn't include the doc ID)
     user["phone_number"] = phone
 
     try:
-        parsed = await parse_message(inbound.text)   # Layer 1
-        agent  = route(parsed)                        # Layer 2
-        result = agent.execute(parsed, user)          # Layer 3
-        reply  = format_response(result, user)        # Layer 4
+        parser_context = _build_parser_context(user)
+        parsed = await parse_message(inbound.text, user_context=parser_context)  # Layer 1
+        agent  = route(parsed)                                                    # Layer 2
+        result = agent.execute(parsed, user)                                      # Layer 3
+        reply  = format_response(result, user)                                    # Layer 4
         send_whatsapp_message(phone, reply)
+
+        # Optional second message for agents that return a follow_up_message
+        # (e.g. CalendarAgent creation → "¿Quieres más detalles?").
+        follow_up = (result.data or {}).get("follow_up_message")
+        if follow_up:
+            send_whatsapp_message(phone, follow_up)
     except Exception as e:
         logger.error("Pipeline error for %s: %s", phone, e)
         lang = (user or {}).get("language", "es")

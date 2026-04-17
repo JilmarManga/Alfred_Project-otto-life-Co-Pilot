@@ -1,13 +1,35 @@
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 from app.agents.base_agent import BaseAgent
 from app.models.parsed_message import ParsedMessage
 from app.models.agent_result import AgentResult
-from app.services.google_calendar import get_today_events_for_user, normalize_events, summarize_day, format_events_detailed
+from app.services.google_calendar import (
+    get_today_events_for_user,
+    normalize_events,
+    summarize_day,
+    format_events_detailed,
+    create_event_for_user,
+)
 from app.services.maps.maps_service import estimate_travel_info
 from app.services.weather.weather_service import get_weather_for_today
 from app.services.token_crypto import decrypt
 from app.db.user_context_store import get_user_context, update_user_context
+from app.parser.message_parser import (
+    CREATE_KEYWORDS,
+    REMINDER_OFF_KEYWORDS,
+    REMINDER_ON_KEYWORDS,
+)
+from app.repositories.user_repository import UserRepository
+
+logger = logging.getLogger(__name__)
+
+# Hardcoded per-language copy for the two-message confirmation. The follow-up
+# is sent as a separate WhatsApp message after the main confirmation.
+_FOLLOW_UP_COPY = {
+    "es": "¿Quieres más detalles? 🐙",
+    "en": "Want more details? 🐙",
+}
 
 
 def _find_next_upcoming_event(events: list) -> dict | None:
@@ -39,9 +61,39 @@ class CalendarAgent(BaseAgent):
     def execute(self, parsed: ParsedMessage, user: dict) -> AgentResult:
         try:
             phone = user.get("phone_number", "")
-            refresh_token = self._get_refresh_token(user)
-            event_ref = parsed.event_reference
+            signals = set(parsed.signals or [])
 
+            # Reminder toggle is a settings change — no calendar API needed.
+            # Handle before _get_refresh_token so a disconnected user can still
+            # toggle the preference.
+            if signals & REMINDER_OFF_KEYWORDS:
+                return self._handle_reminder_toggle(phone, enabled=False)
+            if signals & REMINDER_ON_KEYWORDS:
+                return self._handle_reminder_toggle(phone, enabled=True)
+
+            refresh_token = self._get_refresh_token(user)
+
+            has_create_kw = bool(signals & CREATE_KEYWORDS)
+            has_event_fields = bool(parsed.event_title and parsed.event_start)
+
+            # 1. Clear creation: verb + fields
+            if has_create_kw and has_event_fields:
+                return self._handle_creation(parsed, user, refresh_token)
+
+            # 2. Create verb but missing details
+            if has_create_kw and not has_event_fields:
+                return AgentResult(
+                    agent_name="CalendarAgent",
+                    success=False,
+                    error_message="missing_event_details",
+                )
+
+            # 3. Ambiguous: fields extracted without a creation verb → ask user
+            if has_event_fields:
+                return self._handle_clarify_creation(parsed, user, phone)
+
+            # 4. Existing paths (unchanged)
+            event_ref = parsed.event_reference
             if event_ref is not None:
                 return self._handle_followup(parsed, user, phone, event_ref, refresh_token)
 
@@ -182,5 +234,99 @@ class CalendarAgent(BaseAgent):
                 "weather_summary": weather.get("summary"),
                 "weather_temperature": weather.get("temperature"),
                 **travel_data,
+            },
+        )
+
+    def _handle_creation(self, parsed: ParsedMessage, user: dict, refresh_token: str) -> AgentResult:
+        try:
+            start_dt = datetime.fromisoformat(parsed.event_start)
+        except (ValueError, TypeError):
+            logger.warning("Invalid event_start from parser: %r", parsed.event_start)
+            return AgentResult(
+                agent_name="CalendarAgent",
+                success=False,
+                error_message="missing_event_details",
+            )
+
+        duration = parsed.event_duration_minutes or 60
+        end_dt = start_dt + timedelta(minutes=duration)
+
+        tz_str = user.get("timezone") or "UTC"
+        lang = (user.get("language") or "es").lower()
+
+        try:
+            event = create_event_for_user(
+                refresh_token,
+                title=parsed.event_title,
+                start_iso=start_dt.isoformat(),
+                end_iso=end_dt.isoformat(),
+                timezone_str=tz_str,
+                location=parsed.event_location,
+            )
+        except Exception as exc:
+            logger.exception("Calendar event creation failed: %s", exc)
+            return AgentResult(
+                agent_name="CalendarAgent",
+                success=False,
+                error_message="create_failed",
+            )
+
+        follow_up = _FOLLOW_UP_COPY.get(lang, _FOLLOW_UP_COPY["es"])
+
+        return AgentResult(
+            agent_name="CalendarAgent",
+            success=True,
+            data={
+                "type": "calendar_create",
+                "title": parsed.event_title,
+                "start": start_dt.isoformat(),
+                "location": parsed.event_location,
+                "event_id": event.get("id"),
+                "follow_up_message": follow_up,
+            },
+        )
+
+    def _handle_clarify_creation(self, parsed: ParsedMessage, user: dict, phone: str) -> AgentResult:
+        """
+        LLM extracted event fields but no CREATE keyword was found — ambiguous
+        between "do I have this?" and "create this". Stash the extracted event
+        in user_context_store and ask the user to confirm. The next message is
+        intercepted by pending_event_handler (Step 5b).
+        """
+        update_user_context(phone, "pending_event", {
+            "title": parsed.event_title,
+            "start": parsed.event_start,
+            "location": parsed.event_location,
+            "duration_minutes": parsed.event_duration_minutes,
+        })
+
+        return AgentResult(
+            agent_name="CalendarAgent",
+            success=True,
+            data={
+                "type": "calendar_clarify_create",
+                "title": parsed.event_title,
+                "start": parsed.event_start,
+                "location": parsed.event_location,
+            },
+        )
+
+    def _handle_reminder_toggle(self, phone: str, *, enabled: bool) -> AgentResult:
+        """Flip calendar_reminders_enabled. No calendar API call required."""
+        try:
+            UserRepository.set_calendar_reminders_enabled(phone, enabled)
+        except Exception as exc:
+            logger.exception("Reminder toggle failed for %s: %s", phone, exc)
+            return AgentResult(
+                agent_name="CalendarAgent",
+                success=False,
+                error_message="reminder_toggle_failed",
+            )
+
+        return AgentResult(
+            agent_name="CalendarAgent",
+            success=True,
+            data={
+                "type": "reminder_opt_in" if enabled else "reminder_opt_out",
             },
         )

@@ -23,9 +23,8 @@ _PAGE_STYLE = """
   .card{background:#fff;border-radius:16px;box-shadow:0 4px 24px rgba(0,0,0,.08);
         max-width:420px;width:100%;padding:48px 32px;text-align:center}
   .icon{font-size:56px;margin-bottom:16px}
-  /* Replace this div with <img src="..." alt="Otto" class="logo"> when logo is ready */
+  .logo{width:72px;height:72px;object-fit:contain;margin-bottom:8px}
   .brand{font-size:18px;font-weight:600;color:#6c6c80;letter-spacing:.5px;margin-bottom:24px}
-  .brand span{font-size:22px;vertical-align:middle}
   h1{font-size:24px;font-weight:700;color:#1a1a2e;margin-bottom:8px}
   .sub{font-size:15px;color:#6c6c80;line-height:1.5;margin-bottom:32px}
   .cta{display:inline-block;background:#25D366;color:#fff;font-size:15px;font-weight:600;
@@ -44,8 +43,9 @@ _EXPIRED_PAGE = f"""
 {_PAGE_STYLE}
 </head><body>
 <div class="card accent-amber">
+  <img src="/static/logo.png" alt="Otto" class="logo">
+  <div class="brand">Otto</div>
   <div class="icon">⚠️</div>
-  <div class="brand">Otto <span>🐙</span></div>
   <h1>This link has expired</h1>
   <p class="sub">No worries — just send Otto a message on WhatsApp to get a fresh one.</p>
   <a class="cta" href="https://wa.me/" target="_blank">Open WhatsApp</a>
@@ -60,8 +60,9 @@ _DONE_PAGE = f"""
 {_PAGE_STYLE}
 </head><body>
 <div class="card accent-green">
+  <img src="/static/logo.png" alt="Otto" class="logo">
+  <div class="brand">Otto</div>
   <div class="icon">✅</div>
-  <div class="brand">Otto <span>🐙</span></div>
   <h1>You're all set!</h1>
   <p class="sub">Your calendar is connected. Otto will take it from here — your first briefing arrives tomorrow morning.</p>
   <a class="cta" href="https://wa.me/" target="_blank">Back to WhatsApp</a>
@@ -140,6 +141,7 @@ async def callback(request: Request):
         return HTMLResponse(_EXPIRED_PAGE, status_code=500)
 
     UserRepository.save_calendar_credentials(phone, encrypted)
+    UserRepository.set_calendar_reminders_enabled(phone, True)
     UserRepository.clear_oauth_state(phone)
     UserRepository.set_onboarding_state(phone, "completed")
 

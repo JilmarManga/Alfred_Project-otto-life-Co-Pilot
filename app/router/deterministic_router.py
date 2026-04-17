@@ -18,6 +18,43 @@ GREETING_KEYWORDS  = {"hola", "hello", "hey", "buenos días", "buenos dias",
                        "good morning", "buenas tardes", "good afternoon",
                        "buenas noches", "good evening", "buenas", "que tal", "qué tal"}
 GRATITUDE_KEYWORDS = {"gracias", "thanks", "thank you", "thankss", "thanx", "grax", "tks"}
+CREATE_KEYWORDS    = {
+    # Spanish
+    "agendar", "agendalo", "agéndalo",
+    "agenda una", "agenda un", "agenda el", "agenda mi",
+    "crea una", "crea un", "crea el", "crea mi", "crea la",
+    "crear una", "crear un", "crear el", "crear mi", "crear la",
+    "agrega una", "agrega un", "agrega el", "agrega mi",
+    "agregar al calendario", "añade al calendario", "añadir al calendario",
+    "programa una", "programa un", "programar una", "programar un",
+    "nueva reunión", "nuevo evento",
+    # English
+    "add event", "add a meeting", "add an event",
+    "create event", "create meeting", "create a meeting", "create an event",
+    "schedule a", "schedule an", "schedule my",
+    "book a", "book an", "book me",
+    "set up a meeting", "new meeting", "new event",
+    "put it on my calendar", "add to my calendar",
+}
+REMINDER_OFF_KEYWORDS = {
+    # Spanish
+    "recordatorios off", "desactivar recordatorios", "desactiva recordatorios",
+    "desactivar los recordatorios", "quitar recordatorios", "quita recordatorios",
+    "sin recordatorios", "apaga recordatorios", "apagar recordatorios",
+    # English
+    "turn off reminders", "stop reminders", "disable reminders",
+    "mute reminders", "no more reminders",
+}
+REMINDER_ON_KEYWORDS = {
+    # Spanish
+    "recordatorios on", "activar recordatorios", "activa recordatorios",
+    "activar los recordatorios", "reactivar recordatorios",
+    "enciende recordatorios", "encender recordatorios",
+    # English
+    "turn on reminders", "enable reminders", "start reminders",
+    "resume reminders",
+}
+REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 
 
 def route(parsed: ParsedMessage) -> BaseAgent:
@@ -26,17 +63,24 @@ def route(parsed: ParsedMessage) -> BaseAgent:
     Returns the correct agent instance for the given ParsedMessage.
 
     Priority order (no exceptions):
-      1. amount present          → ExpenseAgent
-      2. travel keyword          → TravelAgent
-      3. weather keyword         → WeatherAgent
-      4. summary keyword         → SummaryAgent   (specific money words beat generic calendar words)
-      5. calendar keyword        → CalendarAgent
-      6. event_reference present → CalendarAgent   (ordinal/next follow-ups with no keyword)
-      7. greeting keyword        → GreetingAgent
-      8. gratitude keyword       → GreetingAgent
-      9. fallback                → AmbiguityAgent
+      1. reminder toggle phrase  → CalendarAgent    (settings — bypasses other signals)
+      2. amount present          → ExpenseAgent
+      3. travel keyword          → TravelAgent
+      4. weather keyword         → WeatherAgent
+      5. summary keyword         → SummaryAgent    (specific money words beat generic calendar words)
+      6. calendar keyword        → CalendarAgent
+      7. create keyword          → CalendarAgent    (event creation intent with no calendar noun)
+      8. event_reference present → CalendarAgent    (ordinal/next follow-ups with no keyword)
+      9. greeting keyword        → GreetingAgent
+     10. gratitude keyword       → GreetingAgent
+     11. fallback                → AmbiguityAgent
     """
     signals = set(parsed.signals)
+
+    # Reminder settings jump to the front — otherwise "disable reminders" could
+    # hit GreetingAgent/Ambiguity since it has no calendar noun.
+    if signals & REMINDER_TOGGLE_KEYWORDS:
+        return CalendarAgent()
 
     if parsed.amount is not None:
         return ExpenseAgent()
@@ -51,6 +95,9 @@ def route(parsed: ParsedMessage) -> BaseAgent:
         return SummaryAgent()
 
     if signals & CALENDAR_KEYWORDS:
+        return CalendarAgent()
+
+    if signals & CREATE_KEYWORDS:
         return CalendarAgent()
 
     if parsed.event_reference is not None:

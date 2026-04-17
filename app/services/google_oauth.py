@@ -6,7 +6,7 @@ from google_auth_oauthlib.flow import Flow
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _build_flow(state: Optional[str] = None) -> Flow:

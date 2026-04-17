@@ -200,3 +200,60 @@ class UserRepository:
                 "location_resolution_status": "resolved",
             },
         )
+
+    # --- Calendar reminder helpers (1-hour reminder cron) ---
+
+    @staticmethod
+    def set_calendar_reminders_enabled(user_phone_number: str, enabled: bool) -> None:
+        """Toggle the 1-hour reminder feature for a user."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {"calendar_reminders_enabled": enabled},
+        )
+
+    @staticmethod
+    def list_users_for_reminders() -> List[Dict]:
+        """
+        Users who have connected Google Calendar and haven't opted out of
+        1-hour reminders. `calendar_reminders_enabled` is treated as True
+        by default — only an explicit False disables reminders.
+        """
+        query = (
+            db.collection(UserRepository.COLLECTION_NAME)
+            .where(filter=FieldFilter("google_calendar_connected", "==", True))
+        )
+        results: List[Dict] = []
+        for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("calendar_reminders_enabled") is False:
+                continue
+            if not data.get("google_calendar_refresh_token"):
+                continue
+            data["phone"] = doc.id
+            results.append(data)
+        return results
+
+    @staticmethod
+    def add_notified_event(user_phone_number: str, dedup_key: str, max_entries: int = 100) -> None:
+        """
+        Append a "{eventId}:{YYYY-MM-DD}" entry to notified_event_ids so the
+        same reminder can't fire twice. Trims the list to the last
+        `max_entries` to keep the doc bounded.
+        """
+        doc_ref = db.collection(UserRepository.COLLECTION_NAME).document(user_phone_number)
+        snapshot = doc_ref.get()
+        current: List[str] = []
+        if snapshot.exists:
+            current = (snapshot.to_dict() or {}).get("notified_event_ids") or []
+        if dedup_key in current:
+            return
+        current.append(dedup_key)
+        if len(current) > max_entries:
+            current = current[-max_entries:]
+        doc_ref.set(
+            {
+                "notified_event_ids": current,
+                "updated_at": datetime.utcnow(),
+            },
+            merge=True,
+        )

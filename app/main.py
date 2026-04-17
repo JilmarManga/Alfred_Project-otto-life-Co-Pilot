@@ -2,10 +2,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.whatsapp_webhook import router as whatsapp_router
 from app.api.oauth_routes import router as oauth_router
@@ -26,6 +28,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="otto API", lifespan=lifespan)
+
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
 app.include_router(whatsapp_router, prefix="", tags=["WhatsApp Webhook"])
 app.include_router(oauth_router, prefix="", tags=["Google OAuth"])
 app.include_router(cron_router, prefix="", tags=["Cron"])

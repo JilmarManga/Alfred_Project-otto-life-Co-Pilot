@@ -4,7 +4,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from app.services.morning_brief.message_builder import format_time_human
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # Function to get the Google Calendar service
 def get_calendar_service():
@@ -169,6 +169,62 @@ def get_today_events_for_user(refresh_token: str):
         calendarId="primary",
         timeMin=now,
         timeMax=end,
+        singleEvents=True,
+        orderBy="startTime",
+    ).execute()
+
+    return events_result.get("items", [])
+
+
+def create_event_for_user(
+    refresh_token: str,
+    *,
+    title: str,
+    start_iso: str,
+    end_iso: str,
+    timezone_str: str,
+    location: str = None,
+) -> dict:
+    """
+    Create a calendar event on the user's primary calendar.
+    Returns the created event dict from Google (includes 'id', 'htmlLink', 'start', etc.).
+
+    start_iso / end_iso: ISO 8601 datetime strings. If they include a tz offset
+    Google honors it; timezone_str is provided as a fallback for floating times.
+    """
+    service = get_calendar_service_for_user(refresh_token)
+
+    body = {
+        "summary": title,
+        "start": {"dateTime": start_iso, "timeZone": timezone_str},
+        "end": {"dateTime": end_iso, "timeZone": timezone_str},
+    }
+    if location:
+        body["location"] = location
+
+    return service.events().insert(calendarId="primary", body=body).execute()
+
+
+def get_upcoming_events_window(
+    refresh_token: str,
+    minutes_from: int,
+    minutes_to: int,
+) -> list:
+    """
+    Fetch events starting within [now + minutes_from, now + minutes_to] (UTC).
+    Used by the 1-hour reminder cron (typical window: 55–75 min).
+    Returns raw Google event dicts (callers pull id/summary/start/location).
+    """
+    service = get_calendar_service_for_user(refresh_token)
+
+    now = datetime.datetime.utcnow()
+    time_min = (now + datetime.timedelta(minutes=minutes_from)).isoformat() + "Z"
+    time_max = (now + datetime.timedelta(minutes=minutes_to)).isoformat() + "Z"
+
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=time_min,
+        timeMax=time_max,
         singleEvents=True,
         orderBy="startTime",
     ).execute()

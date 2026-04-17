@@ -15,3 +15,7 @@ class ParsedMessage(BaseModel):
     raw_message: str = Field(..., description="The original user message.")
     signals: List[str] = Field(default_factory=list, description="Intent keywords found in the message.")
     event_reference: Optional[EventReference] = Field(None, description="Calendar event reference for follow-ups.")
+    event_title: Optional[str] = Field(None, description="Title of the event to create (calendar creation intent).")
+    event_start: Optional[str] = Field(None, description="ISO 8601 start datetime with tz offset for the event to create.")
+    event_location: Optional[str] = Field(None, description="Location for the event to create, if any.")
+    event_duration_minutes: Optional[int] = Field(None, description="Event duration in minutes; default 60 applied at creation time.")
