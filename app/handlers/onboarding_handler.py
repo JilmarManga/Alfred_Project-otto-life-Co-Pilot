@@ -21,6 +21,7 @@ from app.services.whatsapp_sender import send_whatsapp_message
 logger = logging.getLogger(__name__)
 
 STATE_LANGUAGE_PENDING = "language_pending"
+STATE_BETA_PENDING = "beta_pending"
 STATE_PROFILE_PENDING = "profile_pending"
 STATE_LOCATION_RETRY = "location_retry"
 STATE_OAUTH_PENDING = "oauth_pending"
@@ -146,8 +147,13 @@ async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bo
                 send_whatsapp_message(phone, onboarding_copy.get("language_retry"))
                 return True
         UserRepository.create_or_update_user(phone, {"language": lang})
-        UserRepository.set_onboarding_state(phone, STATE_PROFILE_PENDING)
+        UserRepository.set_onboarding_state(phone, STATE_BETA_PENDING)
         send_whatsapp_message(phone, onboarding_copy.get("beta_welcome", lang))
+        return True
+
+    if state == STATE_BETA_PENDING:
+        lang = (user.get("language") or "en").lower()
+        UserRepository.set_onboarding_state(phone, STATE_PROFILE_PENDING)
         send_whatsapp_message(phone, onboarding_copy.get("intro", lang))
         return True
 

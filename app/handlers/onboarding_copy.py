@@ -12,14 +12,18 @@ We are still building — and that is exactly why you're here. Use it as if it w
 
 Respond to any message Otto sends you. We will improve what needs improving and add what is missing; everything you want it to do, we will add progressively.
 
-Welcome to the co-pilot's seat. ☀️""",
+Welcome to the co-pilot's seat. ☀️
+
+When you're ready, type: start""",
         "es": """Eres una de las 10 personas que elegimos para darle forma a Otto.
 
 Todavía estamos construyendo — y precisamente por eso estás aquí. Úsalo como si fuera tuyo. Rómpelo, llévalo al límite, dile qué desearías que pudiera hacer.
 
 Responde cualquier mensaje que te mande Otto. Mejoraremos lo que se deba, agregaremos lo que haga falta, todo lo que quieras que haga lo agregaremos progresivamente.
 
-Bienvenido al asiento del copiloto. ☀️""",
+Bienvenido al asiento del copiloto. ☀️
+
+Si estás listo escribe: comenzar""",
     },
     "intro": {
         "en": """Hey 👋 I'm Otto 🐙 — your personal co-pilot for the day ahead.
