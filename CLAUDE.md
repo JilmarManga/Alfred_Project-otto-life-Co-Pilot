@@ -155,7 +155,7 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 | `SummaryAgent` | `summary_agent.py` | Query expenses by date range, aggregate by currency |
 | `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if user specifies one |
 | `GreetingAgent` | `greeting_agent.py` | Hardcoded greeting/gratitude responses, no LLM, no Firestore |
-| `AmbiguityAgent` | `ambiguity_agent.py` | Pass raw message to responder to generate a clarifying question |
+| `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan to detect out-of-scope capability requests vs true ambiguity; logs both to `unknown_messages` with distinct categories |
 
 **Key behaviors:**
 - `ExpenseAgent`: category must be validated against `{"food", "transport", "shopping", "health", "other"}` before building `ExtractedExpense` (Pydantic Literal). Non-standard hints (e.g. "housing", "rent") fall back to "other" then keyword scan.
@@ -182,6 +182,7 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 - `GreetingAgent` + `result.success=True` → short-circuits with `data["response"]` (hardcoded, no LLM call).
 - `type="calendar_clarify_create"` → short-circuits with a deterministic yes/no question via `_build_clarify_message()` (no LLM).
 - `type="reminder_opt_out"` / `type="reminder_opt_in"` → short-circuits with hardcoded ES/EN copy (no LLM).
+- `AmbiguityAgent` + `type="out_of_scope_request"` → short-circuits with hardcoded `_OUT_OF_SCOPE_COPY` (random variant, 3 per language, no LLM). Tells user we can't do it yet but are learning, includes a "¿hay algo más?" tail.
 - `ExpenseAgent` with `needs_currency=True` → short-circuits with the currency-ask prompt.
 - `result.success=False` → first tries `_SPECIFIC_ERRORS` (`missing_event_details`, `create_failed`, `reminder_toggle_failed`), then falls back to the per-agent entry in `_ERROR_MESSAGES`. No LLM call.
 - `result.success=True` (all other agents) → calls GPT-4o-mini with `FORMATTING_PROMPT`; falls back to `_TYPE_FALLBACKS` (per-`data.type`) then `_FALLBACKS` (per-agent) if LLM fails. `follow_up_message` is stripped from the LLM input so it doesn't leak into the rendered reply.
@@ -194,7 +195,8 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 - `WeatherAgent`: 1 line with temp + description + emoji. If `city_not_found` in data, guide user to use full city name.
 - `CalendarAgent` (`type=calendar_create`): one line — confirmation + title + short weekday + time + 📍 location. The follow-up "¿Quieres más detalles? / Want more details?" is dispatched as a **separate** WhatsApp message by the webhook (reads `result.data["follow_up_message"]`).
 - `CalendarAgent` (`type=calendar_next_event`, `calendar_followup`, `calendar_query`): see `FORMATTING_PROMPT` — time + title + 📍 location, with travel + weather for the "next event" variant.
-- `AmbiguityAgent`: warm greeting + one clarifying question. Never just an emoji.
+- `AmbiguityAgent` (`type="out_of_scope_request"`): hardcoded "can't do that yet / adding it to learn" copy with "¿hay algo más?" tail. No LLM.
+- `AmbiguityAgent` (no type — true ambiguity): warm greeting + one clarifying question via LLM. Never just an emoji.
 
 **Important:** `FORMATTING_PROMPT.format(lang_name=...)` is inside the try/except block. Never put format strings with `{variable}` in the prompt text — use `[variable]` for examples instead.
 
@@ -262,9 +264,10 @@ google_oauth_state_token, google_oauth_state_expires_at,
 google_oauth_code_verifier,          # PKCE verifier — written at /authorize, read at /callback
 oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
 
-# 1-hour calendar reminders
-calendar_reminders_enabled,          # bool — True by default when calendar is connected; explicit False = opted out
+# 1-hour calendar reminders + morning brief
+calendar_reminders_enabled,          # bool — True by default when calendar is connected; explicit False = opted out both reminders and morning brief
 notified_event_ids,                  # list[str] of "{eventId}:{YYYY-MM-DD}" — dedupes reminder sends, capped at 100
+morning_brief_sent_date,             # "YYYY-MM-DD" in user's local tz — prevents duplicate sends on the same day
 
 created_at, updated_at
 ```
@@ -292,7 +295,7 @@ user_message, source, created_at
 user_phone_number, raw_message, category, language, onboarding_state,
 parsed_signals, routed_to, user_context, created_at
 ```
-- `category`: `"ambiguity" | "location_retry_failed" | "oauth_pending_query" | "error_fallback"`
+- `category`: `"ambiguity" | "capability_request" | "location_retry_failed" | "oauth_pending_query" | "error_fallback"`
 - `raw_message` is **never** filtered, cleaned, or normalized — the raw input IS the research value
 - Written from `AmbiguityAgent`, onboarding handler, and cron retries. No TTL.
 
@@ -446,6 +449,7 @@ ENVIRONMENT=development|production
 1. **OAuth follow-ups** — for users in `onboarding_state=oauth_pending` past their 3 h due date, mint a fresh state token + PKCE verifier and re-send the authorize link.
 2. **Location retries** — re-run `resolve_location` for users whose geocoding hit `api_error` during onboarding.
 3. **1-hour event reminders** — for every user in `list_users_for_reminders()` (calendar connected, reminders not explicitly disabled), call `get_upcoming_events_window(token, 55, 75)` and send one WhatsApp reminder per event. Dedup via `notified_event_ids` using `{eventId}:{local_date}`. All-day events (no `start.dateTime`) are skipped. Per-user errors (decrypt failure, Calendar API failure) are logged and do not crash the batch.
+4. **Morning brief** — for every user in `list_users_for_morning_brief()` (same gate as reminders), check if their local time is 06:00–06:14. If yes and `morning_brief_sent_date != today_local`, compose and send the brief (calendar events + weather + travel to first event) then write `morning_brief_sent_date`. Uses per-user refresh token via `get_today_events_for_user()`. Per-user errors are logged and do not crash the batch.
 
 ---
 

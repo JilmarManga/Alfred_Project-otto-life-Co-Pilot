@@ -1,5 +1,6 @@
 import os
 import logging
+import random
 from datetime import datetime
 
 import openai
@@ -131,6 +132,19 @@ _REMINDER_OPT_IN_COPY = {
     "en": "Done! I'll send you reminders again 🔔",
 }
 
+_OUT_OF_SCOPE_COPY = {
+    "es": [
+        "Todavía no sé hacer eso 🐙 pero lo agrego a mi lista de habilidades por aprender. Te aviso cuando lo tenga listo para que me lo dejes a mí la próxima. ¿Hay algo más en lo que sí pueda ayudarte?",
+        "Eso aún no está en mis superpoderes 🐙 pero lo anoto para aprenderlo. Te escribo apenas lo domine. ¿En qué más te puedo ayudar hoy?",
+        "Uff, eso todavía no lo manejo 🐙 lo agrego a las próximas habilidades que voy a aprender. Te aviso cuando pueda. ¿Hay algo más que pueda hacer por ti?",
+    ],
+    "en": [
+        "I can't do that yet 🐙 but I'm adding it to the skills I'll learn. I'll let you know when I've got it so you can leave it to me next time. Is there anything else I can help you with?",
+        "That's not one of my skills yet 🐙 I'm noting it down to learn. I'll message you the moment I can handle it. Anything else I can help with today?",
+        "Not in my toolbox yet 🐙 but I'm adding it to what I'll learn next. I'll ping you once I can take it off your plate. Is there something else I can do for you?",
+    ],
+}
+
 
 def _format_time_for_clarify(iso_start: str, lang: str) -> str:
     """Small, locale-aware time rendering for the clarify short-circuit.
@@ -184,6 +198,12 @@ def format_response(result: AgentResult, user: dict) -> str:
         return _REMINDER_OPT_OUT_COPY.get(lang, _REMINDER_OPT_OUT_COPY["es"])
     if agent == "CalendarAgent" and result.success and data_type == "reminder_opt_in":
         return _REMINDER_OPT_IN_COPY.get(lang, _REMINDER_OPT_IN_COPY["es"])
+
+    # Out-of-scope capability request — hardcoded warm response, no LLM call.
+    # Tells the user we can't do this yet and that we're adding it to our backlog.
+    if agent == "AmbiguityAgent" and result.success and data_type == "out_of_scope_request":
+        variants = _OUT_OF_SCOPE_COPY.get(lang, _OUT_OF_SCOPE_COPY["en"])
+        return random.choice(variants)
 
     # Special case: expense needs a currency answer — not a real error.
     if agent == "ExpenseAgent" and data.get("needs_currency"):

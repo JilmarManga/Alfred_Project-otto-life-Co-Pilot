@@ -10,6 +10,7 @@ from app.handlers import onboarding_copy
 from app.repositories.user_repository import UserRepository
 from app.services.google_calendar import get_upcoming_events_window
 from app.services.location_resolver import resolve_location, STATUS_RESOLVED
+from app.services.morning_briefing import run_morning_briefing
 from app.services.token_crypto import decrypt
 from app.services.whatsapp_sender import send_whatsapp_message
 
@@ -121,18 +122,66 @@ def _run_event_reminders() -> int:
     return sent
 
 
+# --- Morning brief helpers ---
+
+def _is_morning_brief_window(tz: ZoneInfo) -> bool:
+    """Return True if the user's local time is between 06:00 and 06:14 (two 15-min cron ticks)."""
+    local_now = datetime.now(tz)
+    return local_now.hour == 6 and local_now.minute < 15
+
+
+def _run_morning_briefs() -> int:
+    """
+    For each user with calendar connected and reminders enabled, check if it's
+    their local 6:00–6:14 and they haven't received the brief today. Sends one
+    brief per user per local day. Returns the number of briefs sent.
+    """
+    sent = 0
+    for user in UserRepository.list_users_for_morning_brief():
+        phone = user.get("phone")
+        encrypted = user.get("google_calendar_refresh_token")
+        if not phone or not encrypted:
+            continue
+
+        tz = _resolve_tz(user.get("timezone"))
+        if not _is_morning_brief_window(tz):
+            continue
+
+        local_today = datetime.now(tz).date().isoformat()
+        if user.get("morning_brief_sent_date") == local_today:
+            continue
+
+        try:
+            refresh_token = decrypt(encrypted)
+        except Exception as exc:
+            logger.exception("Morning brief: decrypt token failed for %s: %s", phone, exc)
+            continue
+
+        try:
+            user["_refresh_token"] = refresh_token
+            run_morning_briefing(user)
+            UserRepository.mark_morning_brief_sent(phone, local_today)
+            sent += 1
+        except Exception as exc:
+            logger.exception("Morning brief: send failed for %s: %s", phone, exc)
+
+    return sent
+
+
 def run_cron_job() -> dict:
     """
     Core cron logic — called by the internal scheduler every 15 min,
-    and also by the HTTP route for manual triggers. Does three things:
+    and also by the HTTP route for manual triggers. Does four things:
       1. Sends the 3h OAuth reminder to users who haven't connected yet,
          minting a fresh state token so the link is actually clickable.
       2. Retries location resolution for users whose geocoding failed during onboarding.
       3. Sends 1-hour reminders for upcoming calendar events.
+      4. Sends the morning brief to users whose local time is 6:00–6:14.
     """
     followups_sent = 0
     locations_resolved = 0
     reminders_sent = 0
+    morning_briefs_sent = 0
 
     # --- 1. OAuth follow-ups ---
     for user in UserRepository.list_pending_oauth_followups():
@@ -180,15 +229,22 @@ def run_cron_job() -> dict:
     except Exception as exc:
         logger.exception("Event reminders run failed: %s", exc)
 
+    # --- 4. Morning briefs (6:00–6:14 local per user) ---
+    try:
+        morning_briefs_sent = _run_morning_briefs()
+    except Exception as exc:
+        logger.exception("Morning briefs run failed: %s", exc)
+
     logger.info(
-        "Cron job complete — followups_sent=%d locations_resolved=%d reminders_sent=%d",
-        followups_sent, locations_resolved, reminders_sent,
+        "Cron job complete — followups_sent=%d locations_resolved=%d reminders_sent=%d morning_briefs_sent=%d",
+        followups_sent, locations_resolved, reminders_sent, morning_briefs_sent,
     )
     return {
         "status": "ok",
         "followups_sent": followups_sent,
         "locations_resolved": locations_resolved,
         "reminders_sent": reminders_sent,
+        "morning_briefs_sent": morning_briefs_sent,
     }
 
 

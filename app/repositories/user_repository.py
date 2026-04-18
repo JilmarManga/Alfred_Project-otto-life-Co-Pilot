@@ -257,3 +257,35 @@ class UserRepository:
             },
             merge=True,
         )
+
+    # --- Morning brief helpers ---
+
+    @staticmethod
+    def list_users_for_morning_brief() -> List[Dict]:
+        """
+        Users who have connected Google Calendar and haven't opted out of
+        reminders. Explicit `calendar_reminders_enabled=False` disables both
+        1-hour reminders and the morning brief.
+        """
+        query = (
+            db.collection(UserRepository.COLLECTION_NAME)
+            .where(filter=FieldFilter("google_calendar_connected", "==", True))
+        )
+        results: List[Dict] = []
+        for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("calendar_reminders_enabled") is False:
+                continue
+            if not data.get("google_calendar_refresh_token"):
+                continue
+            data["phone"] = doc.id
+            results.append(data)
+        return results
+
+    @staticmethod
+    def mark_morning_brief_sent(user_phone_number: str, local_date_iso: str) -> None:
+        """Persist the local YYYY-MM-DD on which the morning brief was sent for dedup."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {"morning_brief_sent_date": local_date_iso},
+        )
