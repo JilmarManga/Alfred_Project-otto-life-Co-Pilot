@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
-
+from google.cloud.firestore_v1.base_query import FieldFilter
 from app.core.firebase import db
 
 
@@ -41,3 +41,13 @@ class UnknownMessageRepository:
             }
         )
         return doc_ref.id
+
+    @staticmethod
+    def list_recent(hours: int = 24) -> List[Dict[str, Any]]:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        query = (
+            db.collection(UnknownMessageRepository.COLLECTION_NAME)
+            .where(filter=FieldFilter("created_at", ">=", cutoff))
+            .order_by("created_at")
+        )
+        return [doc.to_dict() for doc in query.stream()]

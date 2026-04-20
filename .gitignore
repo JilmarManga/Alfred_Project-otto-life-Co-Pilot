@@ -3,3 +3,8 @@ credentials/
 firebase_credentials.json
 __pycache__/
 *.pyc
+
+# macOS
+.DS_Store
+**/.DS_Store
+.DS_Store?
