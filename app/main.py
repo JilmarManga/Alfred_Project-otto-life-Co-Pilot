@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -19,9 +20,9 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(run_cron_job, "interval", minutes=15, id="oauth_followups")
+    scheduler.add_job(run_cron_job, CronTrigger(minute="0,15,30,45"), id="cron_job")
     scheduler.start()
-    logger.info("Scheduler started — oauth_followups every 15 min")
+    logger.info("Scheduler started — cron_job every 15 min at :00/:15/:30/:45")
     yield
     scheduler.shutdown()
     logger.info("Scheduler stopped")
