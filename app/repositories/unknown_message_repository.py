@@ -37,7 +37,7 @@ class UnknownMessageRepository:
                 "parsed_signals": parsed_signals or [],
                 "routed_to": routed_to,
                 "user_context": user_context or {},
-                "created_at": datetime.utcnow(),
+                "created_at": datetime.now(timezone.utc),
             }
         )
         return doc_ref.id
