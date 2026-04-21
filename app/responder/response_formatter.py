@@ -50,8 +50,12 @@ CalendarAgent:
   Use a short weekday abbreviation. Never add extra text — the follow-up question is sent as a separate message.
 
 TravelAgent:
-- Clearly state when the user should leave and how long the trip takes.
-- Use natural phrasing like "Sal a las 8:20 — son 40 min con tráfico 🚗"
+- If type is "travel_leave_plan": one line with leave time and duration, then naturally ask if they want a departure reminder.
+  Example ES: "Sal a las [leave_at] — son [duration_minutes] min con tráfico 🚗 ¿Te aviso cuando sea hora de salir?"
+  Example EN: "Leave by [leave_at] — [duration_minutes] min with traffic 🚗 Want me to remind you when it's time to leave?"
+  Never use curly-brace variables — only square-bracket placeholders as shown above.
+- Otherwise: clearly state when the user should leave and how long the trip takes.
+  Use natural phrasing like "Sal a las 8:20 — son 40 min con tráfico 🚗"
 
 WeatherAgent:
 - One line: temperature + description + an emoji matching the weather.
@@ -106,6 +110,23 @@ _SPECIFIC_ERRORS = {
         "es": "No pude actualizar tus recordatorios. Intenta de nuevo 🙏",
         "en": "Couldn't update your reminders. Try again 🙏",
     },
+    # TravelAgent — location resolution errors
+    "geocode_not_found": {
+        "es": "No encontré ese lugar 🗺️ ¿Puedes darme el nombre completo o la dirección exacta?",
+        "en": "Couldn't find that place 🗺️ Can you give me the full name or exact address?",
+    },
+    "geocode_ambiguous": {
+        "es": "Ese nombre puede ser varios lugares 🗺️ ¿Puedes ser más específico? Por ejemplo: Bogotá, Colombia o el nombre completo del lugar.",
+        "en": "That name matches several places 🗺️ Can you be more specific? For example: the full city name or address.",
+    },
+    "maps_unavailable_for_place": {
+        "es": "No pude calcular el tiempo de viaje ahora. Intenta de nuevo en un momento 🙏",
+        "en": "Couldn't calculate travel time right now. Try again in a moment 🙏",
+    },
+    "no_upcoming_event_for_location": {
+        "es": "No encontré un evento próximo al que asociar esa ubicación 📅",
+        "en": "I couldn't find an upcoming event to match that location to 📅",
+    },
 }
 
 # Per-type success fallbacks used when the LLM formatting call fails for a
@@ -113,6 +134,21 @@ _SPECIFIC_ERRORS = {
 # would be misleading (e.g. on creation success).
 _TYPE_FALLBACKS = {
     "calendar_create": {"es": "Guardado ✅", "en": "Saved ✅"},
+    "travel_leave_plan": {
+        "es": "Te digo cuándo salir 🚗 ¿Quieres que te avise?",
+        "en": "I'll tell you when to leave 🚗 Want me to remind you?",
+    },
+}
+
+# Hardcoded copy for travel reminder confirmation and abort (no LLM needed).
+_TRAVEL_REMINDER_CONFIRMED_COPY = {
+    "es": "Listo, te aviso cuando sea hora de salir 🔔",
+    "en": "Got it, I'll ping you when it's time to leave 🔔",
+}
+
+_TRAVEL_REMINDER_ABORTED_COPY = {
+    "es": "Entendido, no te mando recordatorio 🙂",
+    "en": "Got it, no reminder then 🙂",
 }
 
 # Day-name tables for short-circuited messages that need a locale-aware weekday.
@@ -201,6 +237,12 @@ def format_response(result: AgentResult, user: dict) -> str:
         return _REMINDER_OPT_OUT_COPY.get(lang, _REMINDER_OPT_OUT_COPY["es"])
     if agent == "CalendarAgent" and result.success and data_type == "reminder_opt_in":
         return _REMINDER_OPT_IN_COPY.get(lang, _REMINDER_OPT_IN_COPY["es"])
+
+    # Travel reminder confirmed / aborted — hardcoded, no LLM call.
+    if agent == "TravelAgent" and result.success and data_type == "travel_reminder_confirmed":
+        return _TRAVEL_REMINDER_CONFIRMED_COPY.get(lang, _TRAVEL_REMINDER_CONFIRMED_COPY["es"])
+    if agent == "TravelAgent" and result.success and data_type == "travel_reminder_aborted":
+        return _TRAVEL_REMINDER_ABORTED_COPY.get(lang, _TRAVEL_REMINDER_ABORTED_COPY["es"])
 
     # Out-of-scope capability request — hardcoded warm response, no LLM call.
     # Tells the user we can't do this yet and that we're adding it to our backlog.
