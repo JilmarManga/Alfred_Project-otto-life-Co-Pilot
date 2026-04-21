@@ -36,14 +36,21 @@ SummaryAgent:
 - Example: "💰 Esta semana:\n• COP $2.500.000\n• USD $150"
 
 CalendarAgent:
-- If type is "calendar_query": list all events clearly. Include time and location for each.
-- If type is "calendar_followup": show ONLY that single event — its time and location. Nothing else.
+- If type is "calendar_query": list all events clearly. For each event show time, title, and location (if location is missing or null, render exactly "📍 No location" — do NOT translate it). DO NOT include travel plan, leave_at, duration, or traffic info for any event in this list — travel only appears in calendar_next_event and calendar_followup.
+- If type is "calendar_followup": show ONLY that single event. Structure:
+  🕐 [time] — [title]
+  📍 [location]  (if location is missing or null, render exactly "📍 No location" — do NOT translate it)
+  IF leave_at AND duration_minutes are BOTH present in the data: render "Sal a las [leave_at] — son [duration] min con tráfico 🚗" (Spanish) or "Leave by [leave_at] — [duration] min with traffic 🚗" (English).
+  ELSE: render "Dime la ubicación y te ayudo con el plan de viaje 🗺️" (Spanish) or "Tell me the location and I'll help you plan the commute 🗺️" (English).
+  Nothing else.
 - If type is "calendar_next_event": use this exact emoji-rich structure (one block, no extra text):
   🕐 [time] — [title]
-  📍 [location]
-  Sal a las [leave_at] — son [duration] min con tráfico 🚗   (Spanish) or  Leave by [leave_at] — [duration] min with traffic 🚗  (English)
+  📍 [location]  (if location is missing or null, render exactly "📍 No location" — do NOT translate it)
+  IF leave_at AND duration_minutes are BOTH present in the data: render "Sal a las [leave_at] — son [duration] min con tráfico 🚗" (Spanish) or "Leave by [leave_at] — [duration] min with traffic 🚗" (English).
+  ELSE: render "Dime la ubicación y te ayudo con el plan de viaje 🗺️" (Spanish) or "Tell me the location and I'll help you plan the commute 🗺️" (English).
   [weather emoji matching conditions] [temperature] [weather_summary]
-  Always include the clock emoji matching the hour, 📍 for location, 🚗 for traffic, and a weather emoji (☀️🌤️⛅🌥️☁️🌧️⛈️🌩️❄️🌫️).
+  Always include the clock emoji matching the hour and a weather emoji (☀️🌤️⛅🌥️☁️🌧️⛈️🌩️❄️🌫️).
+  NEVER invent leave_at, duration_minutes, or travel timing values — only use what is explicitly in the data.
 - If type is "calendar_create": ONE line only — confirmation + title + day + time + 📍 location (if present).
   Example ES: "Guardado ✅ Almuerzo con amigos — mié 2pm 📍 CC Titan Plaza"
   Example EN: "Saved ✅ Lunch with friends — Wed 2pm 📍 CC Titan Plaza"
