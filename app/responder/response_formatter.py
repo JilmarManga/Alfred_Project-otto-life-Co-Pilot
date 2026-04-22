@@ -127,6 +127,14 @@ _SPECIFIC_ERRORS = {
         "es": "No encontré un evento próximo al que asociar esa ubicación 📅",
         "en": "I couldn't find an upcoming event to match that location to 📅",
     },
+    "reminder_save_failed": {
+        "es": "No pude guardar el recordatorio. Intenta de nuevo 🙏",
+        "en": "Couldn't save the reminder. Try again 🙏",
+    },
+    "reminder_data_incomplete": {
+        "es": "No pude crear el recordatorio — faltan datos del evento 🙏",
+        "en": "Couldn't create the reminder — some event data was missing 🙏",
+    },
 }
 
 # Per-type success fallbacks used when the LLM formatting call fails for a

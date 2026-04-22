@@ -4,6 +4,7 @@ from app.agents.base_agent import BaseAgent
 from app.agents.travel_agent.skill_context import SkillContext, SkillResult
 from app.agents.travel_agent.skills.next_event_travel import NextEventTravelSkill
 from app.agents.travel_agent.skills.resolve_event_location import ResolveEventLocationSkill
+from app.agents.travel_agent.skills.schedule_departure_reminder import ScheduleDepartureReminderSkill
 from app.models.agent_result import AgentResult
 from app.models.parsed_message import ParsedMessage
 from app.services.token_crypto import decrypt
@@ -31,7 +32,7 @@ class TravelAgent(BaseAgent):
     _SKILLS = {
         "next_event_travel": NextEventTravelSkill,
         "resolve_event_location": ResolveEventLocationSkill,
-        # "schedule_departure_reminder": ScheduleDepartureReminderSkill,  # added in Commit 3
+        "schedule_departure_reminder": ScheduleDepartureReminderSkill,
     }
 
     # ------------------------------------------------------------------ #

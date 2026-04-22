@@ -131,7 +131,7 @@ def _handle_location_reply(
             **pending,
             "step": "awaiting_reminder_confirmation",
             "resolved_location": data.get("location"),
-            "leave_at_iso": data.get("leave_at"),
+            "leave_at_display": data.get("leave_at"),   # formatted string, e.g. "8:20 AM"
             "duration_minutes": data.get("duration_minutes"),
         })
     else:
@@ -141,12 +141,6 @@ def _handle_location_reply(
     return True
 
 
-_REMINDER_CONFIRMED_COPY = {
-    "es": "Listo, te aviso cuando sea hora de salir 🔔",
-    "en": "Got it, I'll ping you when it's time to leave 🔔",
-}
-
-
 def _handle_reminder_reply(
     phone: str,
     text: str,
@@ -154,22 +148,23 @@ def _handle_reminder_reply(
     user: dict,
     pending: dict,
 ) -> bool:
-    """User is answering yes/no to the departure-reminder offer.
-
-    Commit 3 replaces the affirm path with the real ScheduleDepartureReminderSkill.
-    Until then, a hardcoded ack is sent so the user gets a response.
-    """
+    """User is answering yes/no to the departure-reminder offer."""
     if _is_affirmative(text):
-        _schedule_departure_reminder(phone, lang, pending)
+        from app.agents.travel_agent import TravelAgent
+        from app.agents.travel_agent.skill_context import SkillContext
+
+        user_with_phone = {**user, "phone_number": phone}
+        ctx = SkillContext(
+            user=user_with_phone,
+            inbound_text=text,
+            payload={"pending_travel": pending},
+        )
+        result = TravelAgent().run_skill("schedule_departure_reminder", ctx)
+        reply = format_response(result, user_with_phone)
+        send_whatsapp_message(phone, reply)
         update_user_context(phone, "pending_travel", None)
         return True
 
     # Unrecognized reply at step 2 → drop stash, run pipeline.
     update_user_context(phone, "pending_travel", None)
     return False
-
-
-def _schedule_departure_reminder(phone: str, lang: str, pending: dict) -> None:
-    """Placeholder replaced in Commit 3 with ScheduleDepartureReminderSkill.
-    Sends a hardcoded confirmation so the flow doesn't dead-end."""
-    send_whatsapp_message(phone, _REMINDER_CONFIRMED_COPY.get(lang, _REMINDER_CONFIRMED_COPY["es"]))
