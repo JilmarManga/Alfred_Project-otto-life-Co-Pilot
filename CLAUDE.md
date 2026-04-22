@@ -21,7 +21,7 @@ Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI G
 
 ---
 
-## 4-Layer Architecture (BUILT — production ready)
+## 4-Layer Architecture
 
 ### Request Flow
 ```
@@ -29,9 +29,9 @@ WhatsApp POST /webhook
   -> route_incoming_message()                [services/message_router.py]
   -> map_incoming_event_to_inbound_message() [services/inbound_message_mapper.py]
   -> UserRepository.get_user()               [repositories/user_repository.py]
-  -> handle_onboarding()                     [handlers/onboarding_handler.py]  ← async gate, runs BEFORE pipeline
+  -> handle_onboarding()                     [handlers/onboarding_handler.py]  ← async gate
   -> handle_pending_expense()                [handlers/pending_expense_handler.py]  ← currency follow-up gate
-  -> handle_pending_event()                  [handlers/pending_event_handler.py]    ← calendar-clarify follow-up gate
+  -> handle_pending_event()                  [handlers/pending_event_handler.py]    ← calendar-clarify gate
   -> parse_message()          LAYER 1        [parser/message_parser.py]
   -> route()                  LAYER 2        [router/deterministic_router.py]
   -> agent.execute()          LAYER 3        [agents/*.py]
@@ -46,130 +46,110 @@ WhatsApp POST /webhook
 ```python
 ParsedMessage(
     amount: Optional[float],
-    currency: Optional[str],       # "COP" | "USD" | "EUR" | None
+    currency: Optional[str],          # "COP" | "USD" | "EUR" | None
     category_hint: Optional[str],
     date_hint: Optional[str],
     raw_message: str,
-    signals: List[str],            # ALWAYS deterministic keyword scan, never from LLM
+    signals: List[str],               # deterministic keyword scan only — never from LLM
     event_reference: Optional[EventReference],
-    # Event creation fields — filled only when the user describes a NEW event
-    event_title: Optional[str],
-    event_start: Optional[str],           # ISO 8601 w/ tz offset
+    event_title: Optional[str],       # filled only for NEW event creation
+    event_start: Optional[str],       # ISO 8601 w/ tz offset
     event_location: Optional[str],
     event_duration_minutes: Optional[int],
 )
 ```
 
 **Rules:**
-- LLM extracts `amount`, `currency`, `category_hint`, `date_hint`, and (when describing a NEW event) `event_title`, `event_start`, `event_location`, `event_duration_minutes` — nothing else
-- `signals` are populated by deterministic keyword scan (`_scan_signals`) — never from LLM output
-- `parse_word_numbers()` runs as fallback if LLM returns null for amount (handles "dos millones", "50 mil", "200 mil pesos")
-- `word_number_parser.py` handles digit+multiplier combos: "50 mil" → 50000, "2 millones" → 2000000
+- LLM extracts `amount`, `currency`, `category_hint`, `date_hint`, and event fields — nothing else
+- `signals` populated by `_scan_signals` — never from LLM
+- `parse_word_numbers()` fallback if LLM returns null for amount ("dos millones" → 2000000, "50 mil" → 50000)
 - Full heuristic fallback (regex + word_number_parser) if LLM call fails entirely
-- `parse_message(raw_text, user_context={"today", "tz"})` — the webhook injects today's date and IANA tz (from `users/{phone}.timezone`) so the LLM can resolve "next Wednesday" / "mañana" to an absolute ISO datetime
-- **Creation-intent safeguard:** if LLM returns `event_title` + `event_start`, the parser sets `amount=None` and `event_reference=None` (defeats clock-time-as-amount and "next Wednesday" → EventReference collision)
-- Clock times ("2pm", "las 3", "14:00") are NEVER amounts — enforced both by prompt and safeguard above
+- `parse_message(raw_text, user_context={"today", "tz"})` — webhook injects today's date and IANA tz so LLM can resolve relative dates
+- **Creation-intent safeguard:** if LLM returns `event_title` + `event_start`, parser sets `amount=None` and `event_reference=None` (defeats clock-time-as-amount collision)
+- Clock times ("2pm", "las 3", "14:00") are NEVER amounts
 
-**Forbidden:** classifying intent, deciding actions, calling Firestore, returning anything beyond the model fields
+**Forbidden:** classifying intent, deciding actions, calling Firestore
 
 ---
 
 ### Layer 2 — Router (`app/router/deterministic_router.py`)
-**Responsibility:** Read `ParsedMessage` → return correct agent instance. Pure logic, no LLM.
+**Responsibility:** Read `ParsedMessage` → return correct agent. Pure logic, no LLM.
 
-**Routing priority order (strict — do not reorder without good reason):**
+**Routing priority (strict — do not reorder):**
 ```python
-if signal in REMINDER_TOGGLE_KEYWORDS: -> CalendarAgent  # settings — bypasses everything else
+if signal in REMINDER_TOGGLE_KEYWORDS: -> CalendarAgent  # settings, must beat everything
 if parsed.amount is not None:          -> ExpenseAgent
-if signal in TRAVEL_KEYWORDS:          -> TravelAgent    # checked before calendar — avoids "reunion" collision
+if signal in TRAVEL_KEYWORDS:          -> TravelAgent    # before Calendar — "salir para mi reunión"
 if signal in WEATHER_KEYWORDS:         -> WeatherAgent
-if signal in SUMMARY_KEYWORDS:         -> SummaryAgent   # specific money words beat generic calendar words like "have"
+if signal in SUMMARY_KEYWORDS:         -> SummaryAgent   # before Calendar — "have" + "spent" → Summary wins
 if signal in CALENDAR_KEYWORDS:        -> CalendarAgent
-if signal in CREATE_KEYWORDS:          -> CalendarAgent  # event creation intent without a calendar noun
-if parsed.event_reference is not None: -> CalendarAgent  # ordinal/next follow-ups with no keyword
-if signal in GREETING_KEYWORDS:        -> GreetingAgent  # social signals after all functional agents
+if signal in CREATE_KEYWORDS:          -> CalendarAgent  # event creation without calendar noun
+if parsed.event_reference is not None: -> CalendarAgent  # ordinal follow-ups with no keyword
+if signal in GREETING_KEYWORDS:        -> GreetingAgent  # after all functional agents
 if signal in GRATITUDE_KEYWORDS:       -> GreetingAgent
 else:                                  -> AmbiguityAgent
 ```
 
-**Keyword sets:**
+**Keyword sets** (exact values in `deterministic_router.py` and `message_parser.py`):
 ```python
-CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
-SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
-                       "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
-TRAVEL_KEYWORDS    = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
-GREETING_KEYWORDS  = {"hola", "hello", "hey", "buenos días", "buenos dias", "good morning", "buenas tardes",
-                       "good afternoon", "buenas noches", "good evening", "buenas", "que tal", "qué tal"}
-GRATITUDE_KEYWORDS = {"gracias", "thanks", "thank you", "thankss", "thanx", "grax", "tks"}
-# Multi-word phrases only — matched via substring, so never include bare words
-# that might collide (no "schedule" alone, no "off" alone, etc.).
-CREATE_KEYWORDS    = {"agendar", "agenda una|un|el|mi", "crea/crear una|un|el|mi|la",
-                       "agregar al calendario", "añade/añadir al calendario",
-                       "programa(r) una|un", "nueva reunión", "nuevo evento",
-                       "add event|a meeting|an event", "create event|meeting|a meeting|an event",
-                       "schedule a|an|my", "book a|an|me",
-                       "set up a meeting", "new meeting|event",
-                       "put it on my calendar", "add to my calendar"}
-REMINDER_OFF_KEYWORDS = {"recordatorios off", "desactivar/desactiva (los) recordatorios",
-                          "quitar/quita recordatorios", "sin recordatorios", "apaga(r) recordatorios",
-                          "turn off reminders", "stop reminders", "disable reminders",
-                          "mute reminders", "no more reminders"}
-REMINDER_ON_KEYWORDS  = {"recordatorios on", "activar/activa (los) recordatorios",
-                          "reactivar recordatorios", "encender/enciende recordatorios",
-                          "turn on reminders", "enable reminders", "start reminders",
-                          "resume reminders"}
+CALENDAR_KEYWORDS  = {"calendario","agenda","reunion","reunión","meeting","event","evento","tengo","schedule","have","day","busy"}
+WEATHER_KEYWORDS   = {"clima","weather","lluvia","temperatura","temperature","rain","calor","frio"}
+SUMMARY_KEYWORDS   = {"resumen","summary","cuanto","cuánto","gaste","gasté","spent","gastos","expenses","wasted","waste","spend","money","dinero","plata","gastado"}
+TRAVEL_KEYWORDS    = {"llegar","llego","tiempo","tráfico","trafico","traffic","travel","arrive","salir","leave"}
+GREETING_KEYWORDS  = {"hola","hello","hey","buenos días","buenos dias","good morning","buenas tardes","good afternoon","buenas noches","good evening","buenas","que tal","qué tal"}
+GRATITUDE_KEYWORDS = {"gracias","thanks","thank you","thankss","thanx","grax","tks"}
+# All CREATE/REMINDER entries are multi-word phrases — bare verbs collide with benign messages
+CREATE_KEYWORDS    = {"agendar","agenda una|un|el|mi","crea/crear una|un|el|mi|la","agregar al calendario",
+                       "añade/añadir al calendario","programa(r) una|un","nueva reunión","nuevo evento",
+                       "add event|a meeting|an event","create event|meeting|a meeting|an event",
+                       "schedule a|an|my","book a|an|me","set up a meeting","new meeting|event",
+                       "put it on my calendar","add to my calendar"}
+REMINDER_OFF_KEYWORDS = {"recordatorios off","desactivar/desactiva (los) recordatorios","quitar/quita recordatorios",
+                          "sin recordatorios","apaga(r) recordatorios","turn off reminders","stop reminders",
+                          "disable reminders","mute reminders","no more reminders"}
+REMINDER_ON_KEYWORDS  = {"recordatorios on","activar/activa (los) recordatorios","reactivar recordatorios",
+                          "encender/enciende recordatorios","turn on reminders","enable reminders",
+                          "start reminders","resume reminders"}
 REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 ```
-The exact keyword strings live in `app/parser/message_parser.py` and `app/router/deterministic_router.py` — the pseudo-grammar above ("a|b|c") is doc shorthand only.
 
-**Important design decisions:**
-- Reminder toggle is **priority #1** so "disable reminders" wins over anything else. It's a settings action with no calendar noun, so without this it would fall to AmbiguityAgent.
-- "hoy", "today", "mañana", "tomorrow" are intentionally NOT in `CALENDAR_KEYWORDS` — they are time modifiers, not intent signals. "tengo" / "have" / "day" are the calendar-intent words.
-- Summary is checked before Calendar: `"have"` + `"spent"` → SummaryAgent wins (specific money words beat generic calendar words).
-- Travel is checked before Calendar so "a qué hora debo salir para mi reunión?" routes to TravelAgent, not CalendarAgent.
-- `CREATE_KEYWORDS` entries are **multi-word phrases** ("crear una", "schedule a"), not bare verbs. A bare "schedule" would collide with "schedule my gym"/"schedule my call"-style messages that aren't creation intent. Bare verbs that are safe in isolation (e.g. "agendar") are kept.
-- `REMINDER_*_KEYWORDS` entries are also multi-word phrases — never bare "stop", "off", "enable", since those substring-match benign words.
-- `event_reference` routing catches ordinal follow-ups ("Y el segundo?") that contain no keyword.
-- Greeting and gratitude are checked AFTER all functional agents so "hola, cuanto gaste hoy?" routes to SummaryAgent, not GreetingAgent.
-- "hi" is intentionally NOT in `GREETING_KEYWORDS` — it's a substring of "this", "children", etc. Similarly "ty" is excluded from `GRATITUDE_KEYWORDS`.
-- These same keyword sets are mirrored in `parser/message_parser.py` for signal scanning.
+**Key design notes:**
+- "hoy"/"today"/"mañana"/"tomorrow" are NOT in `CALENDAR_KEYWORDS` — they're time modifiers, not intent signals
+- "hi" excluded from GREETING (substring of "this", "children"). "ty" excluded from GRATITUDE
+- `CREATE_KEYWORDS` are multi-word phrases — bare "schedule" would collide with "schedule my gym"
 
-**Forbidden:** calling LLM, calling Firestore, confidence scores, making routing assumptions
+**Forbidden:** calling LLM, calling Firestore, confidence scores
 
 ---
 
 ### Layer 3 — Agents (`app/agents/`)
-**Responsibility:** Execute business logic for one domain. Own their Firestore reads/writes.
+**Responsibility:** Execute business logic. Own their Firestore reads/writes.
 
-**Output model** (`app/models/agent_result.py`):
-```python
-AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[str])
-```
+**Output:** `AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[str])`
 
 | Agent | File | Responsibility |
 |---|---|---|
-| `ExpenseAgent` | `expense_agent.py` | Validate amount, normalize currency, save to Firestore `expenses` |
-| `CalendarAgent` | `calendar_agent.py` | Query today's events, create events, clarify ambiguous intent, toggle reminder setting |
-| `TravelAgent` | `travel_agent.py` | Find next event, call Maps API for leave time and duration |
-| `SummaryAgent` | `summary_agent.py` | Query expenses by date range, aggregate by currency |
-| `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if user specifies one |
-| `GreetingAgent` | `greeting_agent.py` | Hardcoded greeting/gratitude responses, no LLM, no Firestore |
-| `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan to detect out-of-scope capability requests vs true ambiguity; logs both to `unknown_messages` with distinct categories |
+| `ExpenseAgent` | `expense_agent.py` | Validate amount, normalize currency, save to `expenses` |
+| `CalendarAgent` | `calendar_agent.py` | Query/create events, clarify intent, toggle reminders |
+| `TravelAgent` | `travel_agent/` (package) | Find next event, Maps API leave time, resolve location, departure reminders |
+| `SummaryAgent` | `summary_agent.py` | Expense aggregation by date range + currency |
+| `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if specified |
+| `GreetingAgent` | `greeting_agent.py` | Hardcoded responses, no LLM, no Firestore |
+| `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan for out-of-scope vs true ambiguity; logs to `unknown_messages` |
 
 **Key behaviors:**
-- `ExpenseAgent`: category must be validated against `{"food", "transport", "shopping", "health", "other"}` before building `ExtractedExpense` (Pydantic Literal). Non-standard hints (e.g. "housing", "rent") fall back to "other" then keyword scan.
-- `WeatherAgent`: if user says "clima en Bogota", extracts "Bogota" and uses it instead of stored location. Returns `city_not_found: True` in data when OpenWeatherMap returns 404 — responder formats a helpful retry message.
-- `SummaryAgent`: handles "hoy", "esta semana", "semana pasada", "este mes", "mes pasado", "este año". Default is current week (Monday–now).
-- `CalendarAgent` + `TravelAgent`: use in-memory `user_context_store` for short-lived conversational context (today's events, last referenced event for "y el segundo?" follow-ups). This is intentional — context is ephemeral.
-- `CalendarAgent` branches (inside `execute`, checked in this order):
-  1. `REMINDER_OFF/ON_KEYWORDS` → `_handle_reminder_toggle` (flips `calendar_reminders_enabled`, no calendar API call). Runs BEFORE `_get_refresh_token` so a disconnected user can still change the setting.
-  2. CREATE keyword + event fields → `_handle_creation` (calls `create_event_for_user`, returns `data.type="calendar_create"` with `follow_up_message` dispatched as a separate WhatsApp message).
-  3. CREATE keyword without fields → `error_message="missing_event_details"`.
-  4. Event fields without CREATE keyword → `_handle_clarify_creation` (stashes pending event in `user_context_store`, returns `type="calendar_clarify_create"` — responder renders a deterministic yes/no question, `pending_event_handler` intercepts the reply).
-  5. `event_reference` → `_handle_followup` (ordinal/next event query).
-  6. Otherwise → `_handle_query` (today's events).
-- `GreetingAgent`: hardcoded responses (no LLM). Picks randomly from 3-4 options per type (greeting/gratitude) per language. Greeting responses include user name. Responder short-circuits — returns `data["response"]` directly, no LLM formatting call.
+- `ExpenseAgent`: category validated against `{"food","transport","shopping","health","other"}`. Non-standard hints fall back to "other" + keyword scan.
+- `WeatherAgent`: extracts city from message ("clima en Bogota") and uses it over stored location. `city_not_found: True` in data when 404.
+- `SummaryAgent`: handles "hoy"/"esta semana"/"semana pasada"/"este mes"/"mes pasado"/"este año". Default = current week (Mon–now).
+- `CalendarAgent` branches (checked in order):
+  1. `REMINDER_OFF/ON_KEYWORDS` → `_handle_reminder_toggle` (runs BEFORE `_get_refresh_token` — disconnected users can still toggle)
+  2. CREATE keyword + event fields → `_handle_creation` (`type="calendar_create"`, `follow_up_message` dispatched separately)
+  3. CREATE keyword without fields → `error_message="missing_event_details"`
+  4. Event fields without CREATE → `_handle_clarify_creation` (stash pending event, `type="calendar_clarify_create"`)
+  5. `event_reference` → `_handle_followup`
+  6. Otherwise → `_handle_query`
+- `GreetingAgent`: picks from 3-4 hardcoded options per type/language. Responder short-circuits on `data["response"]`.
+- `CalendarAgent` + `TravelAgent`: use in-memory `user_context_store` for ephemeral context (resets on restart — intentional).
 
 **Forbidden:** calling LLM, formatting user-facing text, knowing about WhatsApp
 
@@ -179,125 +159,94 @@ AgentResult(agent_name: str, success: bool, data: dict, error_message: Optional[
 **Responsibility:** Convert `AgentResult` → warm WhatsApp message in the user's language.
 
 **Response paths (checked in order):**
-- `GreetingAgent` + `result.success=True` → short-circuits with `data["response"]` (hardcoded, no LLM call).
-- `type="calendar_clarify_create"` → short-circuits with a deterministic yes/no question via `_build_clarify_message()` (no LLM).
-- `type="reminder_opt_out"` / `type="reminder_opt_in"` → short-circuits with hardcoded ES/EN copy (no LLM).
-- `AmbiguityAgent` + `type="out_of_scope_request"` → short-circuits with hardcoded `_OUT_OF_SCOPE_COPY` (random variant, 3 per language, no LLM). Tells user we can't do it yet but are learning, includes a "¿hay algo más?" tail.
-- `ExpenseAgent` with `needs_currency=True` → short-circuits with the currency-ask prompt.
-- `result.success=False` → first tries `_SPECIFIC_ERRORS` (`missing_event_details`, `create_failed`, `reminder_toggle_failed`), then falls back to the per-agent entry in `_ERROR_MESSAGES`. No LLM call.
-- `result.success=True` (all other agents) → calls GPT-4o-mini with `FORMATTING_PROMPT`; falls back to `_TYPE_FALLBACKS` (per-`data.type`) then `_FALLBACKS` (per-agent) if LLM fails. `follow_up_message` is stripped from the LLM input so it doesn't leak into the rendered reply.
+- `GreetingAgent` success → `data["response"]` (no LLM)
+- `type="calendar_clarify_create"` → deterministic yes/no via `_build_clarify_message()` (no LLM)
+- `type="reminder_opt_out"` / `"reminder_opt_in"` → hardcoded ES/EN copy (no LLM)
+- `AmbiguityAgent` + `type="out_of_scope_request"` → hardcoded `_OUT_OF_SCOPE_COPY` (3 variants/lang, no LLM)
+- `ExpenseAgent` `needs_currency=True` → currency-ask prompt (no LLM)
+- `result.success=False` → `_SPECIFIC_ERRORS` first, then `_ERROR_MESSAGES` per agent (no LLM)
+- All other success → GPT-4o-mini with `FORMATTING_PROMPT`; fallback to `_TYPE_FALLBACKS` then `_FALLBACKS`
 
-**Language enforcement:** Prompt says "You MUST respond in {lang_name} ONLY" and user_content repeats it. Language comes from `user["language"]` (Firestore).
+**Language:** `user["language"]` from Firestore. Prompt + user_content both enforce it.
 
-**Agent-specific prompt rules:**
+**Prompt rules per agent:**
 - `ExpenseAgent`: max 1 emoji or 1 word. Never repeat amount/category/currency.
 - `SummaryAgent`: per-currency lines with thousands separators.
-- `WeatherAgent`: 1 line with temp + description + emoji. If `city_not_found` in data, guide user to use full city name.
-- `CalendarAgent` (`type=calendar_create`): one line — confirmation + title + short weekday + time + 📍 location. The follow-up "¿Quieres más detalles? / Want more details?" is dispatched as a **separate** WhatsApp message by the webhook (reads `result.data["follow_up_message"]`).
-- `CalendarAgent` (`type=calendar_next_event`, `calendar_followup`, `calendar_query`): see `FORMATTING_PROMPT` — time + title + 📍 location, with travel + weather for the "next event" variant.
-- `AmbiguityAgent` (`type="out_of_scope_request"`): hardcoded "can't do that yet / adding it to learn" copy with "¿hay algo más?" tail. No LLM.
-- `AmbiguityAgent` (no type — true ambiguity): warm greeting + one clarifying question via LLM. Never just an emoji.
+- `WeatherAgent`: 1 line with temp + description + emoji. If `city_not_found`, guide user to use full city name.
+- `CalendarAgent` `calendar_create`: one line — confirmation + title + weekday + time + 📍 location. `follow_up_message` dispatched as separate WhatsApp message by webhook.
+- `AmbiguityAgent` true ambiguity: warm greeting + one clarifying question. Never just an emoji.
 
-**Important:** `FORMATTING_PROMPT.format(lang_name=...)` is inside the try/except block. Never put format strings with `{variable}` in the prompt text — use `[variable]` for examples instead.
+**Critical:** `FORMATTING_PROMPT.format(lang_name=...)` is inside try/except. Never use `{variable}` in prompt examples — use `[variable]` (Python `.format()` will crash).
 
-**Forbidden:** making routing decisions, calling Firestore or external APIs, returning technical content
+**Forbidden:** routing decisions, calling Firestore or external APIs, returning technical content
 
 ---
 
-## Onboarding Flow V1.0.0 (`app/handlers/onboarding_handler.py`)
+## Onboarding Flow (`app/handlers/onboarding_handler.py`)
 
-Runs as an **async** gate BEFORE the 4-layer pipeline. Returns `True` (consumed) or `False` (proceed to pipeline). Onboarding is NOT an agent — it has no `ParsedMessage`, it runs before the parser. All user-facing strings live in `app/handlers/onboarding_copy.py` as bilingual static templates (no LLM in onboarding output — direct WhatsApp sends).
+Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). All strings in `onboarding_copy.py` (no LLM).
 
-**5-state machine** (stored on `users/{phone}.onboarding_state`):
+**5-state machine** (`users/{phone}.onboarding_state`):
+1. `language_pending` — new user → create doc → bilingual 🇬🇧/🇨🇴 prompt. Spanish wins on tie. Defaults to `en` after retry.
+2. `profile_pending` — ask name + city. `name_city_extractor.py` (LLM + regex). Loops on partial answers.
+3. `location_retry` — when `location_resolver` returns `not_found`/`ambiguous`. Reruns on next message.
+4. `oauth_pending` — OAuth link sent. Returns `False` for non-calendar msgs. Returns `True` + re-surfaces link for calendar msgs.
+5. `completed` — returns `False` → normal pipeline.
 
-1. **`language_pending`** — brand-new user → create doc → bilingual prompt with 🇬🇧/🇨🇴 flags. Accepts variations ("english"/"es"/"1"/flag emoji/etc). Spanish check wins first so "en español" → es. Defaults to `en` after one retry.
-2. **`profile_pending`** — ask name + city in one message. Uses `app/parser/name_city_extractor.py` (LLM + regex fallback) to extract. Partial answers (only name / only city) loop back asking for the missing piece.
-3. **`location_retry`** — fired when `location_resolver` returns `not_found` or `ambiguous`. Asks user to clarify (add country, pick country). Reruns resolver on next message.
-4. **`oauth_pending`** — OAuth link sent, waiting for Google callback. Returns `False` for non-calendar messages (Otto still works). Returns `True` for calendar-keyword messages and re-surfaces the link.
-5. **`completed`** — returns False → normal pipeline runs.
+**Legacy compat:** `onboarding_completed=True` with no `onboarding_state` → treated as `completed`. No migration needed.
 
-**Legacy compat:** users with `onboarding_completed=True` and no `onboarding_state` field are treated as `completed` by `_derive_state()`. No migration needed.
+**Location resolution** (`services/location_resolver.py`): Google Maps Geocoding + Timezone API. Statuses: `resolved|not_found|ambiguous|api_error`. On `api_error` user is NOT blocked — partial state saved, cron retries later.
 
-**Currency is NOT asked during onboarding** — deferred to first expense. See Hard Rule #13.
+**Google Calendar OAuth** (`services/google_oauth.py`, `api/oauth_routes.py`):
+- Per-user Fernet-encrypted refresh tokens. State param = opaque `secrets.token_urlsafe(32)`, 1h expiry, one-time-use.
+- PKCE: `build_authorize_url()` returns `(url, code_verifier)`. Store verifier in Firestore at `/authorize`; pass to `exchange_code(code_verifier=...)` at `/callback`. (See Hard Rule #15)
+- `prompt=consent` forced so Google always returns a refresh_token.
 
-**Location resolution** (`app/services/location_resolver.py`): Google Maps Geocoding + Timezone API. Status values: `resolved | not_found | ambiguous | api_error`. On `api_error` the user is NOT blocked — partial state is saved (`location_raw`, `timezone="UTC"`, `location_resolution_status="pending_retry"`), they proceed to OAuth, and `/cron/oauth-followups` retries geocoding later.
+**Pending expense gate** (`handlers/pending_expense_handler.py`): stashes amount/category in `user_context_store` when `needs_currency=True`. Next message intercepted for currency word → finalize + lock `preferred_currency`.
 
-**Google Calendar OAuth** (`app/services/google_oauth.py`, `app/api/oauth_routes.py`):
-- Per-user refresh tokens, Fernet-encrypted on `users/{phone}.google_calendar_refresh_token` (key: `CALENDAR_TOKEN_ENCRYPTION_KEY`)
-- State param is an opaque `secrets.token_urlsafe(32)` stored on the user doc with 1 h expiry, one-time-use (cleared on callback). **Never** the phone number in plaintext.
-- Routes: `GET /auth/google/authorize?state=X`, `GET /auth/google/callback`, `GET /auth/done`
-- **PKCE flow:** `build_authorize_url()` returns `(url, code_verifier)`. The `code_verifier` is stored in Firestore (`users/{phone}.google_oauth_code_verifier`) at the `/auth/google/authorize` step and passed to `exchange_code()` at the `/auth/google/callback` step. Without this, `google-auth-oauthlib` raises `(invalid_grant) Missing code verifier`.
-- Callback exchanges code → refresh_token → encrypt → save → fetch today's events → send WhatsApp confirmation → redirect to `/auth/done`
-- `prompt=consent` forced on the authorize URL so Google always returns a refresh_token
+**Pending event gate** (`handlers/pending_event_handler.py`): stashes pending event on `calendar_clarify_create`. Classifies next reply: `affirm`→create, `query`→show today, `abort`→drop, `other`→drop + pipeline. Priority: `abort > query > affirm`.
 
-**3h follow-up** (`app/api/cron_routes.py`): `POST /cron/oauth-followups` (secret-protected via `X-Cron-Secret` header / `CRON_SHARED_SECRET` env). Called by external cron every ~15 min. Mints a **fresh** state token + 1 h expiry before sending the reminder (the original link is long dead). Also retries any pending location resolutions. Send-once enforced via `oauth_followup_sent_at`.
-
-**Pending expense currency follow-up** (`app/handlers/pending_expense_handler.py`): sibling gate to onboarding. When `ExpenseAgent` returns `needs_currency=True`, the amount/category is stashed in `user_context_store` (in-memory). The next message is intercepted here, parsed for a currency word (COP/USD/EUR/pesos/dolares/etc), finalized via `ExpenseRepository`, and `preferred_currency` is silently locked in.
-
-**Pending event calendar-clarify follow-up** (`app/handlers/pending_event_handler.py`): sibling gate to pending-expense. When `CalendarAgent._handle_clarify_creation` returns `type=calendar_clarify_create`, the extracted event (title/start/location/duration) is stashed in `user_context_store["pending_event"]`. The next message is intercepted here and classified deterministically by `_classify_intent`:
-- `affirm` ("sí", "dale", "yes", "create it", ≤6 words) → create the event + send confirmation + send follow-up question
-- `query` ("solo ver", "just check") → show today's events instead
-- `abort` ("no", "cancela", "nvm") → short ack, drop the stash
-- `other` (any longer message) → drop the stash and let the pipeline handle the new topic
-
-Priority is `abort > query > affirm` (so bare "no" always wins over any affirm keyword that happens to co-occur).
+**Cron** (`api/cron_routes.py`, APScheduler every 15 min in `app/main.py`):
+1. OAuth follow-ups — re-mint fresh state token + PKCE, re-send link (original expired). Send-once via `oauth_followup_sent_at`.
+2. Location retries — re-run `resolve_location` for `pending_retry` users.
+3. 1h event reminders — `get_upcoming_events_window(token, 55, 75)`. Dedup via `notified_event_ids` (`{eventId}:{local_date}`). Skip all-day events.
+4. Morning brief — check local time 06:00–06:14. If `morning_brief_sent_date != today_local` → compose + send (calendar + weather + travel). Write `morning_brief_sent_date`.
 
 ---
 
 ## Firestore Collections
 
-**`users`** (doc ID = phone number e.g. `+573001234567`):
+**`users`** (doc ID = phone number `+573001234567`):
 ```
-# Core identity
 name, language ("es"|"en"), preferred_currency, timezone, location,
 latitude, longitude, location_raw, location_resolution_status,
-
-# Onboarding state (V1.0.0)
-onboarding_state ("language_pending"|"profile_pending"|"location_retry"|"oauth_pending"|"completed"),
-onboarding_completed (legacy mirror, still written),
-language_asked_count,
-
-# Google Calendar OAuth (V1.0.0)
-google_calendar_refresh_token (Fernet-encrypted),
-google_calendar_connected,
-google_oauth_state_token, google_oauth_state_expires_at,
-google_oauth_code_verifier,          # PKCE verifier — written at /authorize, read at /callback
+onboarding_state, onboarding_completed (legacy),  language_asked_count,
+google_calendar_refresh_token (Fernet), google_calendar_connected,
+google_oauth_state_token, google_oauth_state_expires_at, google_oauth_code_verifier,
 oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
-
-# 1-hour calendar reminders + morning brief
-calendar_reminders_enabled,          # bool — True by default when calendar is connected; explicit False = opted out both reminders and morning brief
-notified_event_ids,                  # list[str] of "{eventId}:{YYYY-MM-DD}" — dedupes reminder sends, capped at 100
-morning_brief_sent_date,             # "YYYY-MM-DD" in user's local tz — prevents duplicate sends on the same day
-
+calendar_reminders_enabled,   # True by default on connect; explicit False = opted out
+notified_event_ids,           # list[str] "{eventId}:{YYYY-MM-DD}" — capped at 100
+morning_brief_sent_date,      # "YYYY-MM-DD" user local tz
 created_at, updated_at
 ```
-- `location`: normalized "City, Region, Country" from Google Maps Geocoding (used by weather/travel APIs). `location_raw` is the user's exact input, kept for research.
-- `preferred_currency`: **not set during onboarding**. First expense with an explicit currency silently locks it in. See Hard Rule #13.
-- `timezone`: IANA tz from Google Timezone API. Falls back to `"UTC"` only when geocoding failed and is pending cron retry.
-- `language`: "es" | "en" — controls all response language
-- `calendar_reminders_enabled`: set to `True` by `/auth/google/callback` right after `save_calendar_credentials`. Treated as True unless explicitly `False` — the reminder cron filters via `UserRepository.list_users_for_reminders()`.
-- `notified_event_ids`: event dedup keys use the event's **local** date (user's tz) so a recurring event legitimately fires one reminder per day. `UserRepository.add_notified_event` trims the list to the last 100 entries.
+- `location`: normalized "City, Region, Country" from Geocoding. `location_raw` = user's raw input.
+- `preferred_currency`: not set during onboarding. Locked on first expense with explicit currency.
+- `timezone`: IANA tz. Falls back to `"UTC"` only on geocoding failure (pending retry).
+- `notified_event_ids`: keyed by local date so recurring events get one reminder per day.
 
-**`expenses`** (auto ID):
-```
-user_phone_number, amount, currency, category, confidence,
-user_message, source, created_at
-```
-- `category`: one of `"food"`, `"transport"`, `"shopping"`, `"health"`, `"other"`
-- `source`: always `"whatsapp user's chat"`
+**`expenses`** (auto ID): `user_phone_number, amount, currency, category, confidence, user_message, source, created_at`
+- `category`: `"food"|"transport"|"shopping"|"health"|"other"`. `source`: always `"whatsapp user's chat"`.
 
-**`user_context`** (doc ID = phone number):
-- Firestore-backed context store (`app/db/firestore_context_store.py`) — exists but NOT used by agents
-- Agents use in-memory `user_context_store.py` for ephemeral conversational state (resets on server restart — intentional for short-lived follow-up context)
+**`user_context`**: exists but NOT used by agents. Agents use in-memory `user_context_store.py`.
 
-**`unknown_messages`** (auto ID — product research log):
-```
-user_phone_number, raw_message, category, language, onboarding_state,
-parsed_signals, routed_to, user_context, created_at
-```
-- `category`: `"ambiguity" | "capability_request" | "location_retry_failed" | "oauth_pending_query" | "error_fallback"`
-- `raw_message` is **never** filtered, cleaned, or normalized — the raw input IS the research value
-- Written from `AmbiguityAgent`, onboarding handler, and cron retries. No TTL.
+**`unknown_messages`** (auto ID): `user_phone_number, raw_message, category, language, onboarding_state, parsed_signals, routed_to, user_context, created_at`
+- `category`: `"ambiguity"|"capability_request"|"location_retry_failed"|"oauth_pending_query"|"error_fallback"`
+
+**`scheduled_reminders`** (auto ID): `user_phone_number, type, event_title, event_location, event_start_iso, fire_at, lang, created_at`
+- `type`: `"departure"` (reserved for future reminder types).
+- `fire_at`: ISO 8601 tz-aware string. Cron matches reminders where `fire_at` is in `[now - 5min, now + 15min]`.
+- Docs are **deleted** after delivery — every doc in the collection is pending by definition. No accumulation.
+- Written by `ScheduleDepartureReminderSkill`. Delivered and deleted by `_run_departure_reminders()` in `cron_routes.py`.
 
 ---
 
@@ -307,67 +256,67 @@ parsed_signals, routed_to, user_context, created_at
 app/
 ├── api/
 │   ├── whatsapp_webhook.py          # Thin dispatcher: verify, normalize, gates, 4-layer pipeline
-│   ├── oauth_routes.py              # GET /auth/google/authorize|callback|done
-│   └── cron_routes.py               # POST /cron/oauth-followups (secret-protected); also runs location retries + 1h event reminders
+│   ├── oauth_routes.py              # /auth/google/authorize|callback|done
+│   └── cron_routes.py               # /cron/oauth-followups (X-Cron-Secret protected)
 ├── parser/
-│   ├── message_parser.py            # Layer 1: LLM extraction → ParsedMessage
-│   ├── word_number_parser.py        # Utility: "dos millones"→2000000, "50 mil"→50000
-│   └── name_city_extractor.py       # LLM + regex: extract name + city from onboarding message
+│   ├── message_parser.py            # Layer 1
+│   ├── word_number_parser.py        # "dos millones"→2000000
+│   └── name_city_extractor.py       # Onboarding name+city extraction
 ├── router/
-│   └── deterministic_router.py      # Layer 2: pure keyword routing, no LLM
+│   └── deterministic_router.py      # Layer 2
 ├── agents/
-│   ├── base_agent.py                # Abstract base: execute(parsed, user) -> AgentResult
-│   ├── expense_agent.py             # Save expenses, validate category literals
-│   ├── calendar_agent.py            # Calendar query, follow-up, event creation, clarify, reminder toggle
-│   ├── travel_agent.py              # Maps API leave-time calculation
-│   ├── summary_agent.py             # Expense aggregation by date range + currency
-│   ├── weather_agent.py             # Weather lookup, city extraction from message
-│   ├── greeting_agent.py            # Hardcoded greeting/gratitude responses (no LLM)
-│   └── ambiguity_agent.py           # Pass-through + unknown_messages logger
+│   ├── base_agent.py
+│   ├── expense_agent.py
+│   ├── calendar_agent.py
+│   ├── travel_agent/            # Agent/Skill package — reference implementation (see OTTO_AGENTS.md)
+│   ├── summary_agent.py
+│   ├── weather_agent.py
+│   ├── greeting_agent.py
+│   └── ambiguity_agent.py
 ├── responder/
-│   └── response_formatter.py        # Layer 4: LLM formats warm WhatsApp message
+│   └── response_formatter.py        # Layer 4
 ├── handlers/
-│   ├── onboarding_handler.py        # Pre-pipeline gate: 5-state onboarding machine
-│   ├── onboarding_copy.py           # Bilingual static strings for onboarding messages
-│   ├── pending_expense_handler.py   # Pre-pipeline gate: currency follow-up for stashed expenses
-│   └── pending_event_handler.py     # Pre-pipeline gate: calendar-clarify follow-up (affirm/query/abort)
+│   ├── onboarding_handler.py
+│   ├── onboarding_copy.py           # Bilingual static strings
+│   ├── pending_expense_handler.py
+│   └── pending_event_handler.py
 ├── repositories/
-│   ├── expense_repository.py        # Firestore CRUD for expenses
-│   ├── user_repository.py           # Firestore CRUD for users + OAuth/onboarding helpers
-│   └── unknown_message_repository.py # Firestore write-only log for product research
+│   ├── expense_repository.py
+│   ├── user_repository.py
+│   └── unknown_message_repository.py
 ├── db/
-│   ├── firestore_context_store.py   # Persistent context (Firestore-backed, not used by agents)
-│   └── user_context_store.py        # In-memory context (used by CalendarAgent, TravelAgent, pending expense)
+│   ├── firestore_context_store.py   # Firestore-backed, NOT used by agents
+│   └── user_context_store.py        # In-memory ephemeral context
 ├── models/
-│   ├── parsed_message.py            # Layer 1 output contract
-│   ├── agent_result.py              # Layer 3 output contract
-│   ├── extracted_expense.py         # Pydantic model for expense save
-│   ├── inbound_message.py           # Normalized incoming WhatsApp message
-│   └── webhook_event.py             # Raw webhook payload model
+│   ├── parsed_message.py
+│   ├── agent_result.py
+│   ├── extracted_expense.py
+│   ├── inbound_message.py
+│   └── webhook_event.py
 ├── services/
-│   ├── google_calendar.py           # Calendar API: per-user get_today_events_for_user, create_event_for_user, get_upcoming_events_window (+ legacy global path)
-│   ├── google_oauth.py              # build_authorize_url(), exchange_code() — web OAuth flow
-│   ├── location_resolver.py         # Google Maps Geocoding + Timezone API; status chain
-│   ├── token_crypto.py              # Fernet encrypt/decrypt for stored refresh tokens
-│   ├── maps/maps_service.py         # Google Maps Directions API
-│   ├── weather/weather_service.py   # OpenWeatherMap API (language-aware)
-│   ├── morning_brief/               # Morning brief composer (separate scheduled feature)
-│   ├── message_router.py            # Parses raw WhatsApp payload → IncomingMessageEvent
-│   ├── inbound_message_mapper.py    # IncomingMessageEvent → InboundMessage
-│   └── whatsapp_sender.py           # Sends messages via WhatsApp Cloud API
+│   ├── google_calendar.py           # get_today_events_for_user, create_event_for_user, get_upcoming_events_window
+│   ├── google_oauth.py              # build_authorize_url(), exchange_code()
+│   ├── location_resolver.py
+│   ├── token_crypto.py              # Fernet encrypt/decrypt
+│   ├── maps/maps_service.py
+│   ├── weather/weather_service.py
+│   ├── morning_brief/
+│   ├── message_router.py
+│   ├── inbound_message_mapper.py
+│   └── whatsapp_sender.py
 ├── scripts/
-│   ├── reauthorize_calendar.py      # One-time OAuth reauth (run locally, opens browser)
-│   └── run_morning_brief.py         # Manual trigger for morning brief
+│   ├── reauthorize_calendar.py
+│   └── run_morning_brief.py
 ├── core/
-│   └── firebase.py                  # Firestore client initialization
-└── main.py                          # FastAPI app entry point
+│   └── firebase.py
+└── main.py
 
-# Legacy files (still present, no longer used by main pipeline):
-app/routers/llm_intent_router.py     # DEAD — LLM routing violation. Do not extend.
-app/services/intent_classifier.py    # DEAD — absorbed into deterministic router.
-app/services/expense_extractor.py    # DEAD — absorbed into parser + expense_agent.
-app/ai/ai_service.py                 # DEAD — absorbed into responder.
-app/services/response_service.py     # DEAD — absorbed into responder.
+# DEAD — do not extend:
+app/routers/llm_intent_router.py     # LLM routing violation
+app/services/intent_classifier.py
+app/services/expense_extractor.py
+app/ai/ai_service.py
+app/services/response_service.py
 ```
 
 ---
@@ -378,83 +327,79 @@ app/services/response_service.py     # DEAD — absorbed into responder.
 WHATSAPP_ACCESS_TOKEN
 WHATSAPP_PHONE_NUMBER_ID
 WHATSAPP_VERIFY_TOKEN
-
-FIREBASE_CREDENTIALS_JSON           # Raw JSON string of firebase-service-account.json (production/Railway)
-                                    # Fallback: FIREBASE_CREDENTIALS_PATH (file path) or credentials/firebase-service-account.json (local)
-
+FIREBASE_CREDENTIALS_JSON           # Raw JSON string (Railway). Fallback: FIREBASE_CREDENTIALS_PATH or credentials/firebase-service-account.json
 OPENAI_API_KEY
-
-GOOGLE_MAPS_API_KEY                 # Requires Directions + Geocoding + Timezone APIs enabled in GCP
+GOOGLE_MAPS_API_KEY                 # Requires Directions + Geocoding + Timezone APIs
 OPENWEATHER_API_KEY
-
-# Google Calendar OAuth (per-user web flow)
-GOOGLE_OAUTH_CLIENT_ID              # Web OAuth 2.0 client ID from GCP Console
-GOOGLE_OAUTH_CLIENT_SECRET          # Web OAuth 2.0 client secret from GCP Console
-GOOGLE_OAUTH_REDIRECT_URI           # https://<your-domain>/auth/google/callback
-PUBLIC_BASE_URL                     # https://<your-domain>
+GOOGLE_OAUTH_CLIENT_ID
+GOOGLE_OAUTH_CLIENT_SECRET
+GOOGLE_OAUTH_REDIRECT_URI           # https://<domain>/auth/google/callback
+PUBLIC_BASE_URL
 CALENDAR_TOKEN_ENCRYPTION_KEY       # Fernet key — generate once, never rotate
-
-# Cron
-CRON_SHARED_SECRET                  # Secret header value for POST /cron/oauth-followups
-
+CRON_SHARED_SECRET
 ENVIRONMENT=development|production
 ```
 
-**Google Calendar OAuth:** per-user refresh tokens are Fernet-encrypted and stored in Firestore (`users/{phone}.google_calendar_refresh_token`). No `credentials/google_credentials.json` needed at runtime — credentials are read from env vars. The legacy global `get_today_events()` / `get_calendar_service()` (reading `credentials/token.json`) is dead on production — **always use `get_today_events_for_user(refresh_token)`**.
-
-**Firebase on Railway:** use `FIREBASE_CREDENTIALS_JSON` (raw JSON string). `app/core/firebase.py` writes it to a temp file at startup. Do not try to mount a secret file — Railway has no secret file feature.
+**Firebase on Railway:** use `FIREBASE_CREDENTIALS_JSON`. `firebase.py` writes it to a temp file at startup. Always use `get_today_events_for_user(refresh_token)` — never the legacy `get_today_events()`.
 
 ---
 
 ## Hard Rules
 
-1. **Never let the LLM decide routing.** `llm_intent_router.py` is dead. Do not extend it.
+1. **Never let the LLM decide routing.** `llm_intent_router.py` is dead.
 2. **Never add structured commands for users.** Natural language only.
 3. **Never change Firestore schema** without updating this doc and both repositories.
 4. **Never store secrets in code.** Always `.env`.
-5. **`whatsapp_webhook.py` is a thin dispatcher.** It verifies, normalizes, runs pre-pipeline gates, and orchestrates the 4 layers — nothing else. Any new pre-pipeline concern belongs in its own `handlers/*.py` file called as a gate, not inlined into the webhook.
+5. **`whatsapp_webhook.py` is a thin dispatcher.** New pre-pipeline concerns → own `handlers/*.py` gate.
 6. **Never override user currency** unless the message explicitly states one.
 7. **Never return technical errors to users.** Always a graceful human-friendly fallback.
 8. **New capability = new Agent in `/agents/`.** Never add feature branches inside the webhook.
-9. **Never use `user_context_store.py` for durable data.** It's in-memory. Use Firestore for anything that must survive restarts.
+9. **Never use `user_context_store.py` for durable data.** It's in-memory.
 10. **LLM only in Layer 1 (parser) and Layer 4 (responder).** Never in router or agents.
-11. **Never put `{variable}` inside `FORMATTING_PROMPT` examples.** Use `[variable]` instead — Python's `.format()` will try to substitute it and crash.
-12. **Travel is checked before Calendar in the router.** Do not reorder. "salir para mi reunión" must route to TravelAgent.
-13. **Never ask the user for currency during onboarding.** Currency is deferred to the first expense — if the message contains an explicit currency word/symbol it's silently locked in as `preferred_currency`; otherwise `ExpenseAgent` returns `needs_currency=True` and the user is prompted once. Hard Rule #6 still applies thereafter.
-14. **CalendarAgent and TravelAgent must always use the per-user refresh token.** Never call `get_today_events()` (legacy global path). Always decrypt `user["google_calendar_refresh_token"]` with `token_crypto.decrypt()` and call `get_today_events_for_user(refresh_token)`. Return `error_message="calendar_not_connected"` if the token is missing.
-15. **OAuth PKCE verifier must be stored and retrieved.** `build_authorize_url()` returns `(url, code_verifier)`. Store `code_verifier` in Firestore at `/auth/google/authorize` time. Pass it to `exchange_code(code_verifier=...)` at `/auth/google/callback` time. Omitting this causes `(invalid_grant) Missing code verifier` from Google.
+11. **Never put `{variable}` inside `FORMATTING_PROMPT` examples.** Use `[variable]` instead.
+12. **Travel is checked before Calendar in the router.** Do not reorder.
+13. **Never ask the user for currency during onboarding.** Deferred to first expense. `ExpenseAgent` returns `needs_currency=True` if no explicit currency. Hard Rule #6 applies thereafter.
+14. **CalendarAgent and TravelAgent must always use the per-user refresh token.** Never `get_today_events()`. Decrypt with `token_crypto.decrypt()`. Return `error_message="calendar_not_connected"` if token missing.
+15. **OAuth PKCE verifier must be stored and retrieved.** `build_authorize_url()` returns `(url, code_verifier)`. Store in Firestore at `/authorize`, pass to `exchange_code(code_verifier=...)` at `/callback`. Omitting causes `(invalid_grant) Missing code verifier`.
 
 ---
 
 ## Railway Deployment
 
 **Live URL:** `https://alfredproject-otto-life-co-pilot-production.up.railway.app`
+**Builder:** NIXPACKS (`railway.json`). Do not use RAILPACK.
+**Start:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT` — `0.0.0.0` is mandatory, `$PORT` injected by Railway.
+**Networking:** public domain port must match app bind port (8080). Mismatch → `connection refused` externally.
 
-**Builder:** NIXPACKS (configured in `railway.json`). Do not use RAILPACK — it caused proxy routing issues.
+**Footguns:**
+- `multiRegionConfig` in `railway.json` → edge proxy misrouting (Enterprise only). Keep it out.
+- `dotenv==0.9.9` + `python-dotenv==1.0.1` conflict — only keep `python-dotenv`.
 
-**Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- `--host 0.0.0.0` is mandatory — `127.0.0.1` will cause 502s.
-- `$PORT` is injected by Railway. Do NOT hardcode it or set `PORT` manually in Railway Variables.
+---
 
-**Networking:** In Railway Settings → Networking, the public domain port must match the port the app binds to (currently **8080**). A mismatch (e.g. domain → 8000, app → 8080) causes `connection refused` on every external request while internal healthchecks still pass.
+## Git Branching Strategy
 
-**Known footguns:**
-- `multiRegionConfig` in `railway.json` causes edge proxy misrouting unless you're on an Enterprise plan — keep it out.
-- `runtime: "V2"` combined with multi-region caused 502s — removed.
-- `dotenv==0.9.9` and `python-dotenv==1.0.1` conflict in the same `requirements.txt` — only keep `python-dotenv`.
+| Work type | Branch from | Branch name | PR target |
+|---|---|---|---|
+| New feature | `develop` | `feature/description` | `develop` |
+| Hotfix | `main` | `hotfix/description` | `main` AND `develop` |
+| Release | — | PR `develop` → `main` | `main` |
 
-**Cron:** APScheduler runs `run_cron_job` every 15 minutes in-process (no external cron service). Defined in `app/main.py` lifespan. `run_cron_job` is synchronous — if it ever starts doing heavy work, move it to a thread pool executor to avoid blocking the event loop.
-
-**What `run_cron_job` does each tick:**
-1. **OAuth follow-ups** — for users in `onboarding_state=oauth_pending` past their 3 h due date, mint a fresh state token + PKCE verifier and re-send the authorize link.
-2. **Location retries** — re-run `resolve_location` for users whose geocoding hit `api_error` during onboarding.
-3. **1-hour event reminders** — for every user in `list_users_for_reminders()` (calendar connected, reminders not explicitly disabled), call `get_upcoming_events_window(token, 55, 75)` and send one WhatsApp reminder per event. Dedup via `notified_event_ids` using `{eventId}:{local_date}`. All-day events (no `start.dateTime`) are skipped. Per-user errors (decrypt failure, Calendar API failure) are logged and do not crash the batch.
-4. **Morning brief** — for every user in `list_users_for_morning_brief()` (same gate as reminders), check if their local time is 06:00–06:14. If yes and `morning_brief_sent_date != today_local`, compose and send the brief (calendar events + weather + travel to first event) then write `morning_brief_sent_date`. Uses per-user refresh token via `get_today_events_for_user()`. Per-user errors are logged and do not crash the batch.
+- Never commit directly to `main` or `develop`
+- Format: `type: description` (`feat`, `fix`, `chore`, `docs`)
+- Push branch → Jilmar opens PR manually on GitHub
 
 ---
 
 ## Adding a New Agent (checklist)
 
+**New agents must follow the Agent/Skill package pattern. See `OTTO_AGENTS.md` for the full spec and checklists.**
+
+For new agents (package pattern):
+1. Create `app/agents/<domain>/` package — see `OTTO_AGENTS.md` § "Adding a New Agent".
+2. Existing flat agents (Expense, Calendar, Summary, Weather, Greeting, Ambiguity) migrate later; do not refactor them as part of adding a new agent.
+
+For reference (flat-file pattern, existing agents only):
 1. Create `app/agents/your_agent.py` extending `BaseAgent`
 2. `execute(parsed: ParsedMessage, user: dict) -> AgentResult`
 3. Add keyword set to `deterministic_router.py` and `message_parser.py`

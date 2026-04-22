@@ -1,7 +1,7 @@
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Header, HTTPException, status
@@ -168,20 +168,64 @@ def _run_morning_briefs() -> int:
     return sent
 
 
+_DEPARTURE_REMINDER_COPY = {
+    "es": "⏰ Es hora de salir para {title}",
+    "en": "⏰ Time to leave for {title}",
+}
+
+
+def _run_departure_reminders() -> int:
+    """
+    Deliver one-off departure reminders whose fire_at falls within the current
+    15-min window. Fires up to 15 min early (never late). Deduped via sent_at.
+    Returns the number of reminders delivered.
+    """
+    from app.repositories.scheduled_reminder_repository import ScheduledReminderRepository
+
+    now = datetime.now(timezone.utc)
+    due = ScheduledReminderRepository.list_due_within(now, horizon_minutes=15)
+    sent = 0
+
+    for reminder in due:
+        phone = reminder.get("user_phone_number")
+        doc_id = reminder.get("id")
+        if not phone or not doc_id:
+            continue
+
+        title = reminder.get("event_title", "")
+        location = reminder.get("event_location", "")
+        lang = (reminder.get("lang") or "es").lower()
+
+        line = _DEPARTURE_REMINDER_COPY.get(lang, _DEPARTURE_REMINDER_COPY["en"]).format(title=title)
+        if location:
+            line += f"\n📍 {location}"
+
+        try:
+            send_whatsapp_message(phone, line)
+            ScheduledReminderRepository.delete(doc_id)
+            sent += 1
+        except Exception as exc:
+            logger.exception("Departure reminder send failed for %s/%s: %s", phone, doc_id, exc)
+
+    return sent
+
+
 def run_cron_job() -> dict:
     """
     Core cron logic — called by the internal scheduler every 15 min,
-    and also by the HTTP route for manual triggers. Does four things:
+    and also by the HTTP route for manual triggers. Does five things:
       1. Sends the 3h OAuth reminder to users who haven't connected yet,
          minting a fresh state token so the link is actually clickable.
       2. Retries location resolution for users whose geocoding failed during onboarding.
       3. Sends 1-hour reminders for upcoming calendar events.
       4. Sends the morning brief to users whose local time is 6:00–6:14.
+      5. Delivers one-off departure reminders scheduled by TravelAgent.
     """
     followups_sent = 0
     locations_resolved = 0
     reminders_sent = 0
     morning_briefs_sent = 0
+    departure_reminders_sent = 0
 
     # --- 1. OAuth follow-ups ---
     for user in UserRepository.list_pending_oauth_followups():
@@ -235,9 +279,16 @@ def run_cron_job() -> dict:
     except Exception as exc:
         logger.exception("Morning briefs run failed: %s", exc)
 
+    # --- 5. One-off departure reminders ---
+    try:
+        departure_reminders_sent = _run_departure_reminders()
+    except Exception as exc:
+        logger.exception("Departure reminders run failed: %s", exc)
+
     logger.info(
-        "Cron job complete — followups_sent=%d locations_resolved=%d reminders_sent=%d morning_briefs_sent=%d",
-        followups_sent, locations_resolved, reminders_sent, morning_briefs_sent,
+        "Cron job complete — followups_sent=%d locations_resolved=%d reminders_sent=%d "
+        "morning_briefs_sent=%d departure_reminders_sent=%d",
+        followups_sent, locations_resolved, reminders_sent, morning_briefs_sent, departure_reminders_sent,
     )
     return {
         "status": "ok",
@@ -245,6 +296,7 @@ def run_cron_job() -> dict:
         "locations_resolved": locations_resolved,
         "reminders_sent": reminders_sent,
         "morning_briefs_sent": morning_briefs_sent,
+        "departure_reminders_sent": departure_reminders_sent,
     }
 
 
