@@ -171,7 +171,7 @@ WhatsApp POST /webhook
 
 Gate: `app/handlers/pending_travel_handler.py` — two-step state machine (`awaiting_location` / `awaiting_reminder_confirmation`).
 
-Repository: `app/repositories/scheduled_reminder_repository.py` — `create`, `list_due_within`, `mark_sent`.
+Repository: `app/repositories/scheduled_reminder_repository.py` — `create`, `list_due_within`, `delete`.
 
 Cron delivery: `_run_departure_reminders()` in `app/api/cron_routes.py` (5th pass, 15-min cadence).
 
