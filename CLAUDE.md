@@ -242,11 +242,11 @@ created_at, updated_at
 **`unknown_messages`** (auto ID): `user_phone_number, raw_message, category, language, onboarding_state, parsed_signals, routed_to, user_context, created_at`
 - `category`: `"ambiguity"|"capability_request"|"location_retry_failed"|"oauth_pending_query"|"error_fallback"`
 
-**`scheduled_reminders`** (auto ID): `user_phone_number, type, event_title, event_location, event_start_iso, fire_at, lang, sent_at, created_at`
+**`scheduled_reminders`** (auto ID): `user_phone_number, type, event_title, event_location, event_start_iso, fire_at, lang, created_at`
 - `type`: `"departure"` (reserved for future reminder types).
-- `fire_at`: ISO 8601 tz-aware string. Cron matches reminders where `sent_at IS NULL AND fire_at <= now + 15min`.
-- `sent_at`: `null` until delivered; ISO string on delivery (dedup guard).
-- Written by `ScheduleDepartureReminderSkill`. Delivered by `_run_departure_reminders()` in `cron_routes.py`.
+- `fire_at`: ISO 8601 tz-aware string. Cron matches reminders where `fire_at` is in `[now - 5min, now + 15min]`.
+- Docs are **deleted** after delivery — every doc in the collection is pending by definition. No accumulation.
+- Written by `ScheduleDepartureReminderSkill`. Delivered and deleted by `_run_departure_reminders()` in `cron_routes.py`.
 
 ---
 

@@ -202,7 +202,7 @@ def _run_departure_reminders() -> int:
 
         try:
             send_whatsapp_message(phone, line)
-            ScheduledReminderRepository.mark_sent(doc_id)
+            ScheduledReminderRepository.delete(doc_id)
             sent += 1
         except Exception as exc:
             logger.exception("Departure reminder send failed for %s/%s: %s", phone, doc_id, exc)

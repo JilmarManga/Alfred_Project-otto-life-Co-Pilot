@@ -1,6 +1,5 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
 from app.core.firebase import db
 
@@ -33,32 +32,25 @@ class ScheduledReminderRepository:
             "event_start_iso": event_start_iso,
             "fire_at": fire_at_iso,
             "lang": lang,
-            "sent_at": None,
             "created_at": now,
         })
         return doc_ref.id
 
     @staticmethod
     def list_due_within(now_utc: datetime, horizon_minutes: int = 15) -> list:
-        """Return unsent reminders whose fire_at is on or before now + horizon.
+        """Return pending reminders whose fire_at falls in [now - 5min, now + horizon].
 
-        Fire window: [now - margin, now + horizon_minutes].
-        The lower bound (5 min ago) prevents re-firing stale docs from a long
-        outage scenario. On normal 15-min cron cadence this is never triggered.
+        Docs are deleted after delivery, so every doc in the collection is
+        undelivered by definition. The lower bound prevents re-firing stale docs
+        after a long outage. On normal 15-min cron cadence it is never triggered.
         """
         from datetime import timedelta
         upper = now_utc + timedelta(minutes=horizon_minutes)
         lower = now_utc - timedelta(minutes=5)
 
         try:
-            from google.cloud.firestore_v1.base_query import FieldFilter
-            docs = (
-                db.collection(_COLLECTION)
-                .where(filter=FieldFilter("sent_at", "==", None))
-                .stream()
-            )
             results = []
-            for doc in docs:
+            for doc in db.collection(_COLLECTION).stream():
                 data = doc.to_dict()
                 if not data:
                     continue
@@ -79,10 +71,9 @@ class ScheduledReminderRepository:
             return []
 
     @staticmethod
-    def mark_sent(doc_id: str, sent_at_iso: Optional[str] = None) -> None:
-        if sent_at_iso is None:
-            sent_at_iso = datetime.now(timezone.utc).isoformat()
+    def delete(doc_id: str) -> None:
+        """Delete a reminder doc after it has been delivered."""
         try:
-            db.collection(_COLLECTION).document(doc_id).update({"sent_at": sent_at_iso})
+            db.collection(_COLLECTION).document(doc_id).delete()
         except Exception as exc:
-            logger.exception("ScheduledReminderRepository.mark_sent failed for %s: %s", doc_id, exc)
+            logger.exception("ScheduledReminderRepository.delete failed for %s: %s", doc_id, exc)
