@@ -1,6 +1,24 @@
 from app.models.morning_brief import MorningBriefData
 from datetime import datetime
 
+_WEATHER_EMOJI_RULES = [
+    ({"tormenta", "thunderstorm", "storm"}, "⛈️"),
+    ({"nieve", "snow", "granizo", "hail", "sleet"}, "❄️"),
+    ({"lluvia intensa", "heavy rain", "heavy intensity"}, "🌧️"),
+    ({"lluvia", "rain", "llovizna", "drizzle", "shower"}, "🌦️"),
+    ({"niebla", "neblina", "fog", "mist", "haze", "bruma"}, "🌫️"),
+    ({"muy nublado", "nublado", "overcast", "broken clouds"}, "☁️"),
+    ({"nubes dispersas", "scattered clouds", "pocas nubes", "few clouds", "parcialmente nublado", "partly"}, "🌥️"),
+    ({"despejado", "clear", "soleado", "sunny"}, "☀️"),
+]
+
+def _weather_emoji(summary: str) -> str:
+    lowered = summary.lower()
+    for keywords, emoji in _WEATHER_EMOJI_RULES:
+        if any(kw in lowered for kw in keywords):
+            return emoji
+    return "🌡️"
+
 def format_time_human(iso_str: str, language: str = "es") -> str:
     try:
         dt = datetime.fromisoformat(iso_str)
@@ -26,12 +44,12 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
 
     # 1. Greeting
     if language == "es":
-        greeting = "Buenos días"
+        greeting = "☀️ Buenos días"
         if user_name:
             greeting += f" {user_name}"
         greeting += "."
     else:
-        greeting = "Good morning"
+        greeting = "☀️ Good morning"
         if user_name:
             greeting += f" {user_name}"
         greeting += "."
@@ -40,9 +58,9 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
 
     # 2. Event count
     if language == "es":
-        lines.append(f"Tienes {event_count} eventos hoy.")
+        lines.append(f"Tienes {event_count} eventos hoy. 📅")
     else:
-        lines.append(f"You have {event_count} events today.")
+        lines.append(f"You have {event_count} events today. 📅")
 
     # 3. First event detail
     if first_event:
@@ -110,9 +128,8 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
     temperature = weather.get("temperature")
     if summary:
         label = "Clima" if language == "es" else "Weather"
-        weather_msg = f"{label}: {summary}"
-        if temperature:
-            weather_msg += f", {temperature}"
+        emoji = _weather_emoji(summary)
+        weather_msg = f"{label}: {summary}, {emoji} {temperature}" if temperature else f"{label}: {summary} {emoji}"
         lines.append(weather_msg)
 
     # Debugging output
