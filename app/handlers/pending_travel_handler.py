@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional
 
 from app.db.user_context_store import get_user_context, update_user_context
@@ -36,14 +37,26 @@ _NOT_CONNECTED = {
 _MAX_REPLY_WORDS = 6
 
 
-def _is_abort(text: str) -> bool:
+def _matches_keyword(text: str, keywords: set) -> bool:
+    """Word-boundary match for single-word keywords; substring match for multi-word.
+    Prevents false positives like 'no' matching inside 'andino'."""
     lower = text.lower().strip()
-    return any(kw in lower for kw in _ABORT_KEYWORDS)
+    for kw in keywords:
+        if " " in kw:
+            if kw in lower:
+                return True
+        else:
+            if re.search(r'\b' + re.escape(kw) + r'\b', lower):
+                return True
+    return False
+
+
+def _is_abort(text: str) -> bool:
+    return _matches_keyword(text, _ABORT_KEYWORDS)
 
 
 def _is_affirmative(text: str) -> bool:
-    lower = text.lower().strip()
-    return any(kw in lower for kw in _AFFIRMATIVE_KEYWORDS)
+    return _matches_keyword(text, _AFFIRMATIVE_KEYWORDS)
 
 
 def handle_pending_travel(inbound: InboundMessage, user: Optional[dict]) -> bool:

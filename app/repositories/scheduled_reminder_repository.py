@@ -51,9 +51,10 @@ class ScheduledReminderRepository:
         lower = now_utc - timedelta(minutes=5)
 
         try:
+            from google.cloud.firestore_v1.base_query import FieldFilter
             docs = (
                 db.collection(_COLLECTION)
-                .where("sent_at", "==", None)
+                .where(filter=FieldFilter("sent_at", "==", None))
                 .stream()
             )
             results = []
