@@ -131,7 +131,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 |---|---|---|
 | `ExpenseAgent` | `expense_agent.py` | Validate amount, normalize currency, save to `expenses` |
 | `CalendarAgent` | `calendar_agent.py` | Query/create events, clarify intent, toggle reminders |
-| `TravelAgent` | `travel_agent.py` | Find next event, Maps API leave time |
+| `TravelAgent` | `travel_agent/` (package) | Find next event, Maps API leave time, resolve location, departure reminders |
 | `SummaryAgent` | `summary_agent.py` | Expense aggregation by date range + currency |
 | `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if specified |
 | `GreetingAgent` | `greeting_agent.py` | Hardcoded responses, no LLM, no Firestore |
@@ -242,6 +242,12 @@ created_at, updated_at
 **`unknown_messages`** (auto ID): `user_phone_number, raw_message, category, language, onboarding_state, parsed_signals, routed_to, user_context, created_at`
 - `category`: `"ambiguity"|"capability_request"|"location_retry_failed"|"oauth_pending_query"|"error_fallback"`
 
+**`scheduled_reminders`** (auto ID): `user_phone_number, type, event_title, event_location, event_start_iso, fire_at, lang, sent_at, created_at`
+- `type`: `"departure"` (reserved for future reminder types).
+- `fire_at`: ISO 8601 tz-aware string. Cron matches reminders where `sent_at IS NULL AND fire_at <= now + 15min`.
+- `sent_at`: `null` until delivered; ISO string on delivery (dedup guard).
+- Written by `ScheduleDepartureReminderSkill`. Delivered by `_run_departure_reminders()` in `cron_routes.py`.
+
 ---
 
 ## File Structure
@@ -262,7 +268,7 @@ app/
 │   ├── base_agent.py
 │   ├── expense_agent.py
 │   ├── calendar_agent.py
-│   ├── travel_agent.py
+│   ├── travel_agent/            # Agent/Skill package — reference implementation (see OTTO_AGENTS.md)
 │   ├── summary_agent.py
 │   ├── weather_agent.py
 │   ├── greeting_agent.py
@@ -387,6 +393,13 @@ ENVIRONMENT=development|production
 
 ## Adding a New Agent (checklist)
 
+**New agents must follow the Agent/Skill package pattern. See `OTTO_AGENTS.md` for the full spec and checklists.**
+
+For new agents (package pattern):
+1. Create `app/agents/<domain>/` package — see `OTTO_AGENTS.md` § "Adding a New Agent".
+2. Existing flat agents (Expense, Calendar, Summary, Weather, Greeting, Ambiguity) migrate later; do not refactor them as part of adding a new agent.
+
+For reference (flat-file pattern, existing agents only):
 1. Create `app/agents/your_agent.py` extending `BaseAgent`
 2. `execute(parsed: ParsedMessage, user: dict) -> AgentResult`
 3. Add keyword set to `deterministic_router.py` and `message_parser.py`
