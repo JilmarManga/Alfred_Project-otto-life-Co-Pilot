@@ -51,7 +51,9 @@ GPT_MODEL = "gpt-4o-mini"
 
 # Deterministic signal keyword sets (from CLAUDE.md)
 CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
+WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio",
+                       "llover", "lloverá", "llueve", "raining",
+                       "be hot", "is it hot", "too hot", "so hot", "how hot", "getting hot"}
 SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
                        "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
 TRAVEL_KEYWORDS    = {"llegar", "llego", "tiempo", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}

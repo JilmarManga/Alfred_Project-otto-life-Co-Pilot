@@ -10,7 +10,9 @@ from app.agents.greeting_agent import GreetingAgent
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
 CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
+WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio",
+                       "llover", "lloverá", "llueve", "raining",
+                       "be hot", "is it hot", "too hot", "so hot", "how hot", "getting hot"}
 SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
                        "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
 TRAVEL_KEYWORDS    = {"llegar", "llego", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
