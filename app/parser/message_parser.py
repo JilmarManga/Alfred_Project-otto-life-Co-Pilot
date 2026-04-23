@@ -46,11 +46,28 @@ def _parse_event_reference(text: str) -> EventReference | None:
 
 logger = logging.getLogger(__name__)
 
+# Detects clock-time references so the word-number fallback doesn't misread a
+# clock hour as a money amount when the LLM correctly returns null.
+# Covers explicit formats AND natural language time-of-day phrases (standalone
+# or with a number), so "7 de la tarde" and "in the afternoon" both guard correctly.
+_CLOCK_TIME_RE = re.compile(
+    r"\b\d{1,2}\s*(?:am|pm|hrs?)\b"                               # "7 am", "9pm", "10h"
+    r"|\b\d{1,2}:\d{2}\b"                                         # "14:00", "7:30"
+    r"|\b(?:a\s+las|at|las)\s+\d{1,2}\b"                         # "a las 7", "at 3", "las 2"
+    r"|\b\d{1,2}\s*(?:de la|por la|en la)\s*(?:tarde|noche|mañana|madrugada)\b"  # "7 de la tarde"
+    r"|\b(?:de la|por la|en la)\s+(?:tarde|noche|mañana|madrugada)\b"            # standalone "de la tarde"
+    r"|\bin the\s+(?:afternoon|morning|evening|night)\b"          # "in the afternoon"
+    r"|\bat\s+(?:night|noon|midnight)\b"                          # "at night"
+    r"|\bthis\s+(?:morning|afternoon|evening|night)\b"            # "this morning"
+    r"|\btonight\b|\besta\s+(?:noche|tarde|mañana)\b",            # "tonight", "esta noche/tarde/mañana"
+    re.IGNORECASE,
+)
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
 GPT_MODEL = "gpt-4o-mini"
 
 # Deterministic signal keyword sets (from CLAUDE.md)
-CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
+CALENDAR_KEYWORDS  = {"calendario", "calendar", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
 WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio",
                        "llover", "lloverá", "llueve", "raining",
                        "be hot", "is it hot", "too hot", "so hot", "how hot", "getting hot"}
@@ -69,12 +86,14 @@ CREATE_KEYWORDS    = {
     "crear una", "crear un", "crear el", "crear mi", "crear la",
     "agrega", "agrega una", "agrega un", "agrega el", "agrega mi",
     "agregar al calendario", "añade al calendario", "añadir al calendario",
+    "programa", "programar",
     "programa una", "programa un", "programar una", "programar un",
     "nueva reunión", "nuevo evento",
     # English
     "add event", "add a meeting", "add an event",
     "create event", "create meeting", "create a meeting", "create an event",
     "schedule a", "schedule an", "schedule my",
+    "program a", "program an", "program my",
     "book a", "book an", "book me",
     "set up a meeting", "new meeting", "new event",
     "put it on my calendar", "add to my calendar",
@@ -231,8 +250,10 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             except (TypeError, ValueError):
                 amount = parse_word_numbers(str(raw_amount))
 
-        # Post-process: if LLM missed word-numbers, try parser on raw text
-        if amount is None:
+        # Post-process: if LLM missed word-numbers, try parser on raw text.
+        # Skip when the message contains a clock time — the LLM returned null
+        # deliberately (e.g. "a las 7 am") and the digit is not a money amount.
+        if amount is None and not _CLOCK_TIME_RE.search(raw_text):
             amount = parse_word_numbers(raw_text)
 
         currency = data.get("currency")
