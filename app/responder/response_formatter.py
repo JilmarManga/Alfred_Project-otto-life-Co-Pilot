@@ -65,8 +65,10 @@ TravelAgent:
   Use natural phrasing like "Sal a las 8:20 — son 40 min con tráfico 🚗"
 
 WeatherAgent:
-- One line: temperature + description + an emoji matching the weather.
 - If city_not_found is true: tell the user you couldn't find weather for that city name (use the city value from the data), and suggest they use the full city name. Example ES: "No encontré [city] 🌤️ Intenta con el nombre completo, ej: Cómo va a estar el clima hoy en San Francisco, CA". Example EN: "Couldn't find [city] 🌤️ Try the full name, e.g. How's the weather today in San Francisco, CA"
+- If forecast_unavailable is true: be honest. Acknowledge you couldn't get the forecast and share the current data you do have. One line. Example ES: "No pude obtener el pronóstico ahorita 🌤️ Pero ahora mismo está [temperature] con [summary]". Example EN: "Couldn't get the forecast right now 🌤️ But right now it's [temperature], [summary]"
+- If type is "weather_rain_check" and forecast_unavailable is false: lead with rain probability. Three levels based on rain_probability_pct: >=60 high chance, 30-59 might rain, <30 unlikely. Examples ES: "🌧️ Sí, hay un [rain_probability_pct]% de probabilidad de lluvia hoy. [temperature], [summary]" / "🌦️ Puede que llueva, [rain_probability_pct]% de probabilidad. [temperature], [summary]" / "☀️ No parece que llueva hoy ([rain_probability_pct]%). [temperature], [summary]". Same logic in English.
+- If type is "weather_general" and forecast_unavailable is false: one line with temperature + description + emoji + rain probability appended. Example ES: "🌤️ [temperature], [summary]. [rain_probability_pct]% de probabilidad de lluvia hoy". Example EN: "🌤️ [temperature], [summary]. [rain_probability_pct]% chance of rain today"
 
 AmbiguityAgent:
 - The user's message was unclear. Respond with a warm greeting and ONE natural clarifying question.

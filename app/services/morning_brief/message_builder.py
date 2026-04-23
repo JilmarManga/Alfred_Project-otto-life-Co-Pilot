@@ -126,10 +126,16 @@ def build_morning_message(data: MorningBriefData, language: str, user_name: str 
     # 4. Weather
     summary = weather.get("summary", "")
     temperature = weather.get("temperature")
+    rain_pct = weather.get("rain_probability_pct")
     if summary:
         label = "Clima" if language == "es" else "Weather"
         emoji = _weather_emoji(summary)
         weather_msg = f"{label}: {summary}, {emoji} {temperature}" if temperature else f"{label}: {summary} {emoji}"
+        if rain_pct is not None:
+            if language == "es":
+                weather_msg += f" 🌧️ {rain_pct}% prob. de lluvia."
+            else:
+                weather_msg += f" 🌧️ {rain_pct}% chance of rain."
         lines.append(weather_msg)
 
     # Debugging output
