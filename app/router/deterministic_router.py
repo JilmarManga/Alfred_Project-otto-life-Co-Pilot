@@ -7,6 +7,7 @@ from app.agents.summary_agent import SummaryAgent
 from app.agents.weather_agent import WeatherAgent
 from app.agents.ambiguity_agent import AmbiguityAgent
 from app.agents.greeting_agent import GreetingAgent
+from app.agents.type_clarify_agent import TypeClarifyAgent
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
 CALENDAR_KEYWORDS  = {"calendario", "calendar", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
@@ -65,18 +66,19 @@ def route(parsed: ParsedMessage) -> BaseAgent:
     Returns the correct agent instance for the given ParsedMessage.
 
     Priority order (no exceptions):
-      1. reminder toggle phrase        → CalendarAgent    (settings — bypasses other signals)
-      2. amount present                → ExpenseAgent
-      3. travel keyword                → TravelAgent
-      4. weather keyword               → WeatherAgent
-      5. summary keyword               → SummaryAgent    (specific money words beat generic calendar words)
-      6. calendar keyword              → CalendarAgent
-      7. create keyword                → CalendarAgent    (event creation intent with no calendar noun)
-      8. event_title + event_start set → CalendarAgent    (parser extracted a new event but no keyword matched)
-      9. event_reference present       → CalendarAgent    (ordinal/next follow-ups with no keyword)
-     10. greeting keyword              → GreetingAgent
-     11. gratitude keyword             → GreetingAgent
-     12. fallback                      → AmbiguityAgent
+      1.  reminder toggle phrase                    → CalendarAgent      (settings — bypasses other signals)
+      2a. small int amount + event_title + no hint  → TypeClarifyAgent   (ambiguous: clock time or expense?)
+      2b. amount present                            → ExpenseAgent
+      3.  travel keyword                            → TravelAgent
+      4.  weather keyword                           → WeatherAgent
+      5.  summary keyword                           → SummaryAgent       (specific money words beat generic calendar words)
+      6.  calendar keyword                          → CalendarAgent
+      7.  create keyword                            → CalendarAgent      (event creation intent with no calendar noun)
+      8.  event_title + event_start set             → CalendarAgent      (parser extracted a new event but no keyword matched)
+      9.  event_reference present                   → CalendarAgent      (ordinal/next follow-ups with no keyword)
+      10. greeting keyword                          → GreetingAgent
+      11. gratitude keyword                         → GreetingAgent
+      12. fallback                                  → AmbiguityAgent
     """
     signals = set(parsed.signals)
 
@@ -84,6 +86,17 @@ def route(parsed: ParsedMessage) -> BaseAgent:
     # hit GreetingAgent/Ambiguity since it has no calendar noun.
     if signals & REMINDER_TOGGLE_KEYWORDS:
         return CalendarAgent()
+
+    # Small whole number (1–24) + LLM-extracted event title + no expense category
+    # hint = the number is almost certainly a clock time, not an expense amount.
+    # Ask the user to confirm: calendar appointment or expense?
+    if (parsed.amount is not None
+            and parsed.amount == int(parsed.amount)
+            and 1 <= parsed.amount <= 24
+            and bool(parsed.event_title)
+            and parsed.event_start is None
+            and parsed.category_hint is None):
+        return TypeClarifyAgent()
 
     if parsed.amount is not None:
         return ExpenseAgent()
@@ -94,6 +107,13 @@ def route(parsed: ParsedMessage) -> BaseAgent:
     if signals & WEATHER_KEYWORDS:
         return WeatherAgent()
 
+    # Full calendar event extracted by parser — unambiguously a creation intent.
+    # Checked before SUMMARY so a message that mentions "dinero" while describing
+    # an appointment (e.g. "...no es un gasto, quiero que agregues al calendario...")
+    # isn't hijacked by SummaryAgent.
+    if parsed.event_title and parsed.event_start:
+        return CalendarAgent()
+
     if signals & SUMMARY_KEYWORDS:
         return SummaryAgent()
 
@@ -101,12 +121,6 @@ def route(parsed: ParsedMessage) -> BaseAgent:
         return CalendarAgent()
 
     if signals & CREATE_KEYWORDS:
-        return CalendarAgent()
-
-    # Parser extracted a new event (title + start) but no CREATE/CALENDAR keyword
-    # matched (e.g. "Add to the calendar a medical check tomorrow 7 am"). Route to
-    # CalendarAgent which will run _handle_clarify_creation or _handle_creation.
-    if parsed.event_title and parsed.event_start:
         return CalendarAgent()
 
     if parsed.event_reference is not None:

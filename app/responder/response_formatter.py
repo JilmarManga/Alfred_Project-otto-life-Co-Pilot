@@ -78,18 +78,26 @@ Turn it into a warm, human WhatsApp message. No preamble. Respond in {lang_name}
 
 # Fallbacks used when: (a) LLM formatting fails on a successful result, or (b) agent succeeded but edge case
 _FALLBACKS = {
-    "ExpenseAgent":  {"es": "👍 Anotado.", "en": "👍 Saved."},
-    "SummaryAgent":  {"es": "Aquí va tu resumen.", "en": "Here's your summary."},
-    "CalendarAgent": {"es": "Revisé tu agenda.", "en": "Checked your calendar."},
-    "TravelAgent":   {"es": "Te digo cuándo salir.", "en": "I'll tell you when to leave."},
-    "WeatherAgent":  {"es": "Aquí el clima.", "en": "Here's the weather."},
-    "AmbiguityAgent":{"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
-    "GreetingAgent": {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
+    "ExpenseAgent":     {"es": "👍 Anotado.", "en": "👍 Saved."},
+    "SummaryAgent":     {"es": "Aquí va tu resumen.", "en": "Here's your summary."},
+    "CalendarAgent":    {"es": "Revisé tu agenda.", "en": "Checked your calendar."},
+    "TravelAgent":      {"es": "Te digo cuándo salir.", "en": "I'll tell you when to leave."},
+    "WeatherAgent":     {"es": "Aquí el clima.", "en": "Here's the weather."},
+    "AmbiguityAgent":   {"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
+    "GreetingAgent":    {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
+    "TypeClarifyAgent": {"es": "¿Es una cita en tu agenda o un gasto? 🗓️", "en": "Is this a calendar appointment or an expense? 🗓️"},
 }
 
 _NEEDS_CURRENCY = {
     "es": "👌 Anotado. ¿En qué moneda fue? (COP, USD o EUR)",
     "en": "👌 Got it. Which currency was that? (COP, USD, or EUR)",
+}
+
+_TYPE_CLARIFY_COPY = {
+    "es": "¿'{title}' es una cita en tu agenda o un gasto? 🗓️",
+    "en": "Is '{title}' a calendar appointment or an expense? 🗓️",
+    "es_no_title": "¿Es una cita en tu agenda o un gasto? 🗓️",
+    "en_no_title": "Is this a calendar appointment or an expense? 🗓️",
 }
 
 # Separate error messages for when the agent itself failed (expense not saved, etc.)
@@ -258,6 +266,14 @@ def format_response(result: AgentResult, user: dict) -> str:
         return _TRAVEL_REMINDER_CONFIRMED_COPY.get(lang, _TRAVEL_REMINDER_CONFIRMED_COPY["es"])
     if agent == "TravelAgent" and result.success and data_type == "travel_reminder_aborted":
         return _TRAVEL_REMINDER_ABORTED_COPY.get(lang, _TRAVEL_REMINDER_ABORTED_COPY["es"])
+
+    # Calendar-or-expense disambiguation — hardcoded question, no LLM call.
+    if agent == "TypeClarifyAgent" and result.success and data_type == "expense_or_calendar_clarify":
+        title = data.get("event_title") or ""
+        if title:
+            key = lang if lang in ("es", "en") else "es"
+            return _TYPE_CLARIFY_COPY[key].format(title=title)
+        return _TYPE_CLARIFY_COPY.get(f"{lang}_no_title", _TYPE_CLARIFY_COPY["es_no_title"])
 
     # Out-of-scope capability request — hardcoded warm response, no LLM call.
     # Tells the user we can't do this yet and that we're adding it to our backlog.

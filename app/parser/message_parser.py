@@ -46,12 +46,20 @@ def _parse_event_reference(text: str) -> EventReference | None:
 
 logger = logging.getLogger(__name__)
 
-# Detects clock-time references so the word-number fallback doesn't misread
-# "7 am" or "a las 14:00" as a money amount when the LLM correctly returns null.
+# Detects clock-time references so the word-number fallback doesn't misread a
+# clock hour as a money amount when the LLM correctly returns null.
+# Covers explicit formats AND natural language time-of-day phrases (standalone
+# or with a number), so "7 de la tarde" and "in the afternoon" both guard correctly.
 _CLOCK_TIME_RE = re.compile(
-    r"\b\d{1,2}\s*(?:am|pm|hrs?)\b"           # "7 am", "9pm", "10h"
-    r"|\b\d{1,2}:\d{2}\b"                     # "14:00", "7:30"
-    r"|\b(?:a\s+las|at|las)\s+\d{1,2}\b",     # "a las 7", "at 3", "las 2"
+    r"\b\d{1,2}\s*(?:am|pm|hrs?)\b"                               # "7 am", "9pm", "10h"
+    r"|\b\d{1,2}:\d{2}\b"                                         # "14:00", "7:30"
+    r"|\b(?:a\s+las|at|las)\s+\d{1,2}\b"                         # "a las 7", "at 3", "las 2"
+    r"|\b\d{1,2}\s*(?:de la|por la|en la)\s*(?:tarde|noche|mañana|madrugada)\b"  # "7 de la tarde"
+    r"|\b(?:de la|por la|en la)\s+(?:tarde|noche|mañana|madrugada)\b"            # standalone "de la tarde"
+    r"|\bin the\s+(?:afternoon|morning|evening|night)\b"          # "in the afternoon"
+    r"|\bat\s+(?:night|noon|midnight)\b"                          # "at night"
+    r"|\bthis\s+(?:morning|afternoon|evening|night)\b"            # "this morning"
+    r"|\btonight\b|\besta\s+(?:noche|tarde|mañana)\b",            # "tonight", "esta noche/tarde/mañana"
     re.IGNORECASE,
 )
 
