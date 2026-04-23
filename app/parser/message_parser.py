@@ -46,11 +46,20 @@ def _parse_event_reference(text: str) -> EventReference | None:
 
 logger = logging.getLogger(__name__)
 
+# Detects clock-time references so the word-number fallback doesn't misread
+# "7 am" or "a las 14:00" as a money amount when the LLM correctly returns null.
+_CLOCK_TIME_RE = re.compile(
+    r"\b\d{1,2}\s*(?:am|pm|hrs?)\b"           # "7 am", "9pm", "10h"
+    r"|\b\d{1,2}:\d{2}\b"                     # "14:00", "7:30"
+    r"|\b(?:a\s+las|at|las)\s+\d{1,2}\b",     # "a las 7", "at 3", "las 2"
+    re.IGNORECASE,
+)
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
 GPT_MODEL = "gpt-4o-mini"
 
 # Deterministic signal keyword sets (from CLAUDE.md)
-CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
+CALENDAR_KEYWORDS  = {"calendario", "calendar", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
 WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
 SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
                        "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
@@ -231,8 +240,10 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             except (TypeError, ValueError):
                 amount = parse_word_numbers(str(raw_amount))
 
-        # Post-process: if LLM missed word-numbers, try parser on raw text
-        if amount is None:
+        # Post-process: if LLM missed word-numbers, try parser on raw text.
+        # Skip when the message contains a clock time — the LLM returned null
+        # deliberately (e.g. "a las 7 am") and the digit is not a money amount.
+        if amount is None and not _CLOCK_TIME_RE.search(raw_text):
             amount = parse_word_numbers(raw_text)
 
         currency = data.get("currency")
