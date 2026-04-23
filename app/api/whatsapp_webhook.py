@@ -11,6 +11,7 @@ from app.services.whatsapp_sender import send_whatsapp_message
 from app.repositories.user_repository import UserRepository
 from app.handlers.onboarding_handler import handle_onboarding
 from app.handlers.pending_expense_handler import handle_pending_expense
+from app.handlers.pending_type_clarify_handler import handle_pending_type_clarify
 from app.handlers.pending_event_handler import handle_pending_event
 from app.handlers.pending_travel_handler import handle_pending_travel
 from app.parser.message_parser import parse_message
@@ -77,6 +78,9 @@ async def receive_webhook(request: Request) -> dict:
 
     if handle_pending_expense(inbound, user):
         return {"status": "pending_expense"}
+
+    if handle_pending_type_clarify(inbound, user):
+        return {"status": "pending_type_clarify"}
 
     if handle_pending_event(inbound, user):
         return {"status": "pending_event"}
