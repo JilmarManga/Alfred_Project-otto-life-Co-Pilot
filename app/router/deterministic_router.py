@@ -1,3 +1,5 @@
+from typing import Optional
+
 from app.models.parsed_message import ParsedMessage
 from app.agents.base_agent import BaseAgent
 from app.agents.expense_agent import ExpenseAgent
@@ -7,6 +9,8 @@ from app.agents.summary_agent import SummaryAgent
 from app.agents.weather_agent import WeatherAgent
 from app.agents.ambiguity_agent import AmbiguityAgent
 from app.agents.greeting_agent import GreetingAgent
+from app.agents.list_agent import ListAgent
+from app.router.route_decision import Disambiguation, RouteDecision
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
 CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
@@ -57,31 +61,13 @@ REMINDER_ON_KEYWORDS = {
 REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 
 
-def route(parsed: ParsedMessage) -> BaseAgent:
+def _pick_keyword_agent(parsed: ParsedMessage, signals: set) -> Optional[BaseAgent]:
+    """Existing keyword-based priority chain, unchanged in order and effect.
+
+    Returns a concrete agent when a rule fires, or None when nothing matches
+    (caller falls back to AmbiguityAgent). Extracted into its own function so
+    `route()` can compare the keyword-match to a separate list-pattern match.
     """
-    Layer 2: Deterministic router. Pure logic, no LLM, no Firestore.
-    Returns the correct agent instance for the given ParsedMessage.
-
-    Priority order (no exceptions):
-      1. reminder toggle phrase  → CalendarAgent    (settings — bypasses other signals)
-      2. amount present          → ExpenseAgent
-      3. travel keyword          → TravelAgent
-      4. weather keyword         → WeatherAgent
-      5. summary keyword         → SummaryAgent    (specific money words beat generic calendar words)
-      6. calendar keyword        → CalendarAgent
-      7. create keyword          → CalendarAgent    (event creation intent with no calendar noun)
-      8. event_reference present → CalendarAgent    (ordinal/next follow-ups with no keyword)
-      9. greeting keyword        → GreetingAgent
-     10. gratitude keyword       → GreetingAgent
-     11. fallback                → AmbiguityAgent
-    """
-    signals = set(parsed.signals)
-
-    # Reminder settings jump to the front — otherwise "disable reminders" could
-    # hit GreetingAgent/Ambiguity since it has no calendar noun.
-    if signals & REMINDER_TOGGLE_KEYWORDS:
-        return CalendarAgent()
-
     if parsed.amount is not None:
         return ExpenseAgent()
 
@@ -109,4 +95,55 @@ def route(parsed: ParsedMessage) -> BaseAgent:
     if signals & GRATITUDE_KEYWORDS:
         return GreetingAgent()
 
-    return AmbiguityAgent()
+    return None
+
+
+def route(parsed: ParsedMessage, *, skip_list: bool = False) -> RouteDecision:
+    """
+    Layer 2: Deterministic router. Pure logic, no LLM, no Firestore.
+    Returns a RouteDecision carrying either the chosen agent or a
+    Disambiguation when two candidates match.
+
+    Priority order (no exceptions):
+      0. reminder toggle phrase  → CalendarAgent    (settings — wins over lists too)
+      1. amount present          → ExpenseAgent
+      2. travel keyword          → TravelAgent
+      3. weather keyword         → WeatherAgent
+      4. summary keyword         → SummaryAgent    (specific money words beat generic calendar words)
+      5. calendar keyword        → CalendarAgent
+      6. create keyword          → CalendarAgent    (event creation intent with no calendar noun)
+      7. event_reference present → CalendarAgent    (ordinal/next follow-ups with no keyword)
+      8. greeting keyword        → GreetingAgent
+      9. gratitude keyword       → GreetingAgent
+     10. fallback                → AmbiguityAgent
+
+    `skip_list`: reserved for the Gate-5 awaiting_disambiguation branch.
+    When the user picks the non-list candidate, the gate re-calls this
+    router with skip_list=True so the list-match logic is bypassed and the
+    original keyword agent is returned cleanly. ListAgent wiring is added
+    in a later commit; the parameter is accepted now so the signature is
+    stable from day one.
+    """
+    signals = set(parsed.signals)
+
+    # Reminder settings jump to the front — otherwise "disable reminders" could
+    # hit GreetingAgent/Ambiguity since it has no calendar noun. Reminder
+    # toggles also override ListAgent (settings > lists).
+    if signals & REMINDER_TOGGLE_KEYWORDS:
+        return RouteDecision(agent=CalendarAgent())
+
+    keyword_agent = _pick_keyword_agent(parsed, signals)
+    list_match = (not skip_list) and ListAgent.matches(parsed)
+
+    if list_match:
+        # Only true functional agents trigger disambiguation. Greeting and the
+        # ambiguity fallback (keyword_agent is None) lose to ListAgent outright.
+        if keyword_agent is None or isinstance(keyword_agent, GreetingAgent):
+            return RouteDecision(agent=ListAgent())
+        return RouteDecision(
+            disambiguation=Disambiguation(
+                candidates=["ListAgent", keyword_agent.__class__.__name__],
+            ),
+        )
+
+    return RouteDecision(agent=keyword_agent or AmbiguityAgent())

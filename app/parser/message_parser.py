@@ -125,6 +125,18 @@ event to add to their calendar (e.g. "meeting with John tomorrow at 3pm at the o
 - event_location: the place, or null
 - event_duration_minutes: integer minutes if user specifies duration, or null
 
+List operations — fill these fields ONLY when the user is saving, recalling, or
+deleting a user-defined list of items (links, names, notes, anything):
+- list_intent: "save" when they add/store an item; "recall" when they ask to see
+  a list; "delete" when they ask to remove a list; null otherwise.
+- list_name: the list's name exactly as the user typed it, preserving original
+  case and wording. Do not translate, trim, or paraphrase. null if no list name
+  is mentioned.
+- list_item: the content to save — a URL, phrase, or text — exactly as the user
+  sent it. null if not a save intent.
+- list_label: an optional short label the user attached to this specific item.
+  null if no label is mentioned.
+
 DO NOT fill event fields when the user is asking a question about existing events
 ("tengo reunión?", "do I have a meeting?", "cuál es mi próximo evento?", "¿qué tengo hoy?").
 DO NOT fill event fields when the user references events vaguely ("next event",
@@ -137,6 +149,8 @@ Output format:
   "category_hint": <string or null>, "date_hint": <string or null>,
   "event_title": <string or null>, "event_start": <ISO 8601 string or null>,
   "event_location": <string or null>, "event_duration_minutes": <integer or null>,
+  "list_intent": <"save"|"recall"|"delete"|null>, "list_name": <string or null>,
+  "list_item": <string or null>, "list_label": <string or null>,
   "raw_message": <original message> }"""
 
 
@@ -261,6 +275,12 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
         elif event_reference is not None:
             amount = None
 
+        raw_list_intent = data.get("list_intent")
+        list_intent = raw_list_intent if raw_list_intent in {"save", "recall", "delete"} else None
+        list_name = data.get("list_name")
+        list_item = data.get("list_item")
+        list_label = data.get("list_label")
+
         return ParsedMessage(
             amount=amount,
             currency=currency,
@@ -273,6 +293,10 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             event_start=event_start,
             event_location=event_location,
             event_duration_minutes=event_duration_minutes,
+            list_intent=list_intent,
+            list_name=list_name,
+            list_item=list_item,
+            list_label=list_label,
         )
 
     except Exception as e:

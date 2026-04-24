@@ -32,8 +32,10 @@ WhatsApp POST /webhook
   -> handle_onboarding()                     [handlers/onboarding_handler.py]  ← async gate
   -> handle_pending_expense()                [handlers/pending_expense_handler.py]  ← currency follow-up gate
   -> handle_pending_event()                  [handlers/pending_event_handler.py]    ← calendar-clarify gate
+  -> handle_pending_travel()                 [handlers/pending_travel_handler.py]   ← location + reminder gate
+  -> handle_pending_list()                   [handlers/pending_list_handler.py]     ← list choice / delete-confirm / disambig
   -> parse_message()          LAYER 1        [parser/message_parser.py]
-  -> route()                  LAYER 2        [router/deterministic_router.py]
+  -> route()                  LAYER 2        [router/deterministic_router.py]     ← returns RouteDecision
   -> agent.execute()          LAYER 3        [agents/*.py]
   -> format_response()        LAYER 4        [responder/response_formatter.py]
   -> send_whatsapp_message()                 [services/whatsapp_sender.py]
@@ -56,12 +58,16 @@ ParsedMessage(
     event_start: Optional[str],       # ISO 8601 w/ tz offset
     event_location: Optional[str],
     event_duration_minutes: Optional[int],
+    list_intent: Optional[Literal["save","recall","delete"]],
+    list_name: Optional[str],         # as typed, never normalized/translated
+    list_item: Optional[str],         # URL or text to save
+    list_label: Optional[str],        # optional short label per item
 )
 ```
 
 **Rules:**
-- LLM extracts `amount`, `currency`, `category_hint`, `date_hint`, and event fields — nothing else
-- `signals` populated by `_scan_signals` — never from LLM
+- LLM extracts `amount`, `currency`, `category_hint`, `date_hint`, event fields, and list fields (`list_intent`, `list_name`, `list_item`, `list_label`) — nothing else
+- `signals` populated by `_scan_signals` — never from LLM. **List triggers are NOT part of `_scan_signals`**; ListAgent routes via `ListAgent.matches()` pattern predicate (see Layer 2).
 - `parse_word_numbers()` fallback if LLM returns null for amount ("dos millones" → 2000000, "50 mil" → 50000)
 - Full heuristic fallback (regex + word_number_parser) if LLM call fails entirely
 - `parse_message(raw_text, user_context={"today", "tz"})` — webhook injects today's date and IANA tz so LLM can resolve relative dates
@@ -73,11 +79,16 @@ ParsedMessage(
 ---
 
 ### Layer 2 — Router (`app/router/deterministic_router.py`)
-**Responsibility:** Read `ParsedMessage` → return correct agent. Pure logic, no LLM.
+**Responsibility:** Read `ParsedMessage` → return `RouteDecision`. Pure logic, no LLM.
+
+`RouteDecision` (in `app/router/route_decision.py`) carries either a chosen `agent` or a `Disambiguation(candidates=[...])` when two routes match. The webhook asks the user which one on disambiguation.
 
 **Routing priority (strict — do not reorder):**
 ```python
-if signal in REMINDER_TOGGLE_KEYWORDS: -> CalendarAgent  # settings, must beat everything
+if signal in REMINDER_TOGGLE_KEYWORDS: -> CalendarAgent          # settings — wins over ListAgent too
+# ListAgent matches via pattern predicate (ListAgent.matches), then:
+#   keyword_agent is None / GreetingAgent → ListAgent
+#   keyword_agent is a functional agent   → Disambiguation(["ListAgent", <other>])
 if parsed.amount is not None:          -> ExpenseAgent
 if signal in TRAVEL_KEYWORDS:          -> TravelAgent    # before Calendar — "salir para mi reunión"
 if signal in WEATHER_KEYWORDS:         -> WeatherAgent
@@ -89,6 +100,8 @@ if signal in GREETING_KEYWORDS:        -> GreetingAgent  # after all functional 
 if signal in GRATITUDE_KEYWORDS:       -> GreetingAgent
 else:                                  -> AmbiguityAgent
 ```
+
+`route()` accepts `skip_list: bool = False`. Gate 5's `awaiting_disambiguation` step re-calls `route(parsed, skip_list=True)` when the user picks the non-list side, bypassing `ListAgent.matches` cleanly.
 
 **Keyword sets** (exact values in `deterministic_router.py` and `message_parser.py`):
 ```python
@@ -136,6 +149,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 | `WeatherAgent` | `weather_agent.py` | Fetch weather; extracts city from message if specified |
 | `GreetingAgent` | `greeting_agent.py` | Hardcoded responses, no LLM, no Firestore |
 | `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan for out-of-scope vs true ambiguity; logs to `unknown_messages` |
+| `ListAgent` | `list_agent/` (package) | Save/recall/delete user-defined named lists; 3-list cap, 10-min dedup, stages delete confirm |
 
 **Key behaviors:**
 - `ExpenseAgent`: category validated against `{"food","transport","shopping","health","other"}`. Non-standard hints fall back to "other" + keyword scan.
@@ -149,7 +163,12 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
   5. `event_reference` → `_handle_followup`
   6. Otherwise → `_handle_query`
 - `GreetingAgent`: picks from 3-4 hardcoded options per type/language. Responder short-circuits on `data["response"]`.
-- `CalendarAgent` + `TravelAgent`: use in-memory `user_context_store` for ephemeral context (resets on restart — intentional).
+- `CalendarAgent` + `TravelAgent` + `ListAgent`: use in-memory `user_context_store` for ephemeral context (resets on restart — intentional).
+- `ListAgent` skills (in `app/agents/list_agent/skills/`):
+  - `save_to_list`: resolves target list (explicit name, auto-created `"guardados"`/`"saved"` for 0-list users, single-list direct save, or stashes `_choice` when 2+ lists exist and none was named). Enforces 3-list cap. 10-min `sha256(content.strip().lower())` dedup within the target list.
+  - `recall_list`: case-insensitive name lookup; 1-list auto-pick when no name; returns `empty_list` / `list_not_found` with `existing_names` for the responder to render.
+  - `delete_list`: requires explicit name match (never auto-picks — destructive). Stashes `awaiting_delete_confirmation`.
+  - `confirm_delete_list`: gate-only entry; deletes the doc by `list_id` passed in `ctx.payload`.
 
 **Forbidden:** calling LLM, formatting user-facing text, knowing about WhatsApp
 
@@ -163,6 +182,8 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 - `type="calendar_clarify_create"` → deterministic yes/no via `_build_clarify_message()` (no LLM)
 - `type="reminder_opt_out"` / `"reminder_opt_in"` → hardcoded ES/EN copy (no LLM)
 - `AmbiguityAgent` + `type="out_of_scope_request"` → hardcoded `_OUT_OF_SCOPE_COPY` (3 variants/lang, no LLM)
+- `ListAgent` success types → all hardcoded ES/EN copy (no LLM): `list_saved`, `list_saved_deduped`, `list_choice_request`, `list_delete_confirm`, `list_deleted`, `list_disambiguation`. `list_recall` renders a deterministic numbered list + one optional batched LLM call that describes URL items in 3–6 words (fail-open — render URLs alone if the LLM errors).
+- `ListAgent` failure codes → `list_not_found` / `list_cap_reached` / `empty_list` render from `data` (existing_names, requested_name, list_name); `save_failed` / `delete_failed` / `missing_item` use `_SPECIFIC_ERRORS` (no LLM)
 - `ExpenseAgent` `needs_currency=True` → currency-ask prompt (no LLM)
 - `result.success=False` → `_SPECIFIC_ERRORS` first, then `_ERROR_MESSAGES` per agent (no LLM)
 - All other success → GPT-4o-mini with `FORMATTING_PROMPT`; fallback to `_TYPE_FALLBACKS` then `_FALLBACKS`
@@ -248,6 +269,24 @@ created_at, updated_at
 - Docs are **deleted** after delivery — every doc in the collection is pending by definition. No accumulation.
 - Written by `ScheduleDepartureReminderSkill`. Delivered and deleted by `_run_departure_reminders()` in `cron_routes.py`.
 
+**`lists`** (auto ID): user-defined named lists for save/recall.
+```
+user_phone_number: str        # enforced on every query — no cross-user reads
+name: str                     # exactly as user typed, never normalized
+name_lower: str               # lower-cased; used for case-insensitive lookup
+items: list[{
+  content: str,               # URL or text, as user sent
+  label: Optional[str],       # optional short label
+  created_at: ISO str,        # when this item was appended
+  dedup_key: str,             # sha256(content.strip().lower())
+}]
+created_at: ISO str
+updated_at: ISO str
+```
+- Cap: 3 lists per user. `ListRepository.count_user_lists` is checked before any new-list creation.
+- Dedup: `SaveToListSkill` rejects an append when an item with the same `dedup_key` exists in the target list's `items` within the last 10 minutes (retry-loop guard from the April 2026 beta incident).
+- Writers: `SaveToListSkill` (create + append), `ConfirmDeleteListSkill` (delete). Reads: all four ListAgent skills + the `pending_list` gate.
+
 ---
 
 ## File Structure
@@ -263,12 +302,14 @@ app/
 │   ├── word_number_parser.py        # "dos millones"→2000000
 │   └── name_city_extractor.py       # Onboarding name+city extraction
 ├── router/
-│   └── deterministic_router.py      # Layer 2
+│   ├── deterministic_router.py      # Layer 2
+│   └── route_decision.py            # RouteDecision + Disambiguation dataclasses
 ├── agents/
 │   ├── base_agent.py
 │   ├── expense_agent.py
 │   ├── calendar_agent.py
 │   ├── travel_agent/            # Agent/Skill package — reference implementation (see OTTO_AGENTS.md)
+│   ├── list_agent/              # Agent/Skill package — save/recall/delete named lists
 │   ├── summary_agent.py
 │   ├── weather_agent.py
 │   ├── greeting_agent.py
@@ -279,11 +320,15 @@ app/
 │   ├── onboarding_handler.py
 │   ├── onboarding_copy.py           # Bilingual static strings
 │   ├── pending_expense_handler.py
-│   └── pending_event_handler.py
+│   ├── pending_event_handler.py
+│   ├── pending_travel_handler.py    # location + departure-reminder gate
+│   └── pending_list_handler.py      # list choice / delete-confirm / disambiguation gate
 ├── repositories/
 │   ├── expense_repository.py
 │   ├── user_repository.py
-│   └── unknown_message_repository.py
+│   ├── unknown_message_repository.py
+│   ├── scheduled_reminder_repository.py
+│   └── list_repository.py           # `lists` collection
 ├── db/
 │   ├── firestore_context_store.py   # Firestore-backed, NOT used by agents
 │   └── user_context_store.py        # In-memory ephemeral context
