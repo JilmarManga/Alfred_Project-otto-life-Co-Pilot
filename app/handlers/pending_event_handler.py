@@ -18,6 +18,17 @@ from app.services.whatsapp_sender import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
 
+# Explicit calendar-creation phrases that confirm "yes, add this" even in a long
+# reply — e.g. "No es un gasto, quiero que me agregues a mi calendario..."
+# Checked before the word-length gate so the stash is not dropped prematurely.
+_STRONG_AFFIRM_PHRASES = {
+    # Spanish
+    "al calendario", "a mi calendario", "en el calendario", "en la agenda",
+    "a la agenda", "agrégalo", "agéndalo",
+    # English
+    "add to my calendar", "add to calendar", "add it to my calendar",
+}
+
 # Short replies to the clarify question. We only act when the reply is short AND
 # matches one of these sets — longer messages mean the user moved on to a new
 # topic, so we clear the stash and let the normal pipeline handle it.
@@ -80,6 +91,12 @@ def _classify_intent(text: str) -> str:
     lower = (text or "").lower().strip()
     if not lower:
         return "other"
+
+    # Strong creation phrases bypass the word-length gate — the user is
+    # explicitly confirming they want this added to the calendar.
+    if any(phrase in lower for phrase in _STRONG_AFFIRM_PHRASES):
+        return "affirm"
+
     if len(lower.split()) > _MAX_CONFIRMATION_WORDS:
         return "other"
 

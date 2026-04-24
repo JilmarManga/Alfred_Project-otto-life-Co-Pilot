@@ -67,8 +67,10 @@ TravelAgent:
   Use natural phrasing like "Sal a las 8:20 — son 40 min con tráfico 🚗"
 
 WeatherAgent:
-- One line: temperature + description + an emoji matching the weather.
 - If city_not_found is true: tell the user you couldn't find weather for that city name (use the city value from the data), and suggest they use the full city name. Example ES: "No encontré [city] 🌤️ Intenta con el nombre completo, ej: Cómo va a estar el clima hoy en San Francisco, CA". Example EN: "Couldn't find [city] 🌤️ Try the full name, e.g. How's the weather today in San Francisco, CA"
+- If forecast_unavailable is true: be honest. Acknowledge you couldn't get the forecast and share the current data you do have. One line. Example ES: "No pude obtener el pronóstico ahorita 🌤️ Pero ahora mismo está [temperature] con [summary]". Example EN: "Couldn't get the forecast right now 🌤️ But right now it's [temperature], [summary]"
+- If type is "weather_rain_check" and forecast_unavailable is false: lead with rain probability. Three levels based on rain_probability_pct: >=60 high chance, 30-59 might rain, <30 unlikely. Examples ES: "🌧️ Sí, hay un [rain_probability_pct]% de probabilidad de lluvia hoy. [temperature], [summary]" / "🌦️ Puede que llueva, [rain_probability_pct]% de probabilidad. [temperature], [summary]" / "☀️ No parece que llueva hoy ([rain_probability_pct]%). [temperature], [summary]". Same logic in English.
+- If type is "weather_general" and forecast_unavailable is false: one line with temperature + description + emoji + rain probability appended. Example ES: "🌤️ [temperature], [summary]. [rain_probability_pct]% de probabilidad de lluvia hoy". Example EN: "🌤️ [temperature], [summary]. [rain_probability_pct]% chance of rain today"
 
 AmbiguityAgent:
 - The user's message was unclear. Respond with a warm greeting and ONE natural clarifying question.
@@ -80,18 +82,26 @@ Turn it into a warm, human WhatsApp message. No preamble. Respond in {lang_name}
 
 # Fallbacks used when: (a) LLM formatting fails on a successful result, or (b) agent succeeded but edge case
 _FALLBACKS = {
-    "ExpenseAgent":  {"es": "👍 Anotado.", "en": "👍 Saved."},
-    "SummaryAgent":  {"es": "Aquí va tu resumen.", "en": "Here's your summary."},
-    "CalendarAgent": {"es": "Revisé tu agenda.", "en": "Checked your calendar."},
-    "TravelAgent":   {"es": "Te digo cuándo salir.", "en": "I'll tell you when to leave."},
-    "WeatherAgent":  {"es": "Aquí el clima.", "en": "Here's the weather."},
-    "AmbiguityAgent":{"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
-    "GreetingAgent": {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
+    "ExpenseAgent":     {"es": "👍 Anotado.", "en": "👍 Saved."},
+    "SummaryAgent":     {"es": "Aquí va tu resumen.", "en": "Here's your summary."},
+    "CalendarAgent":    {"es": "Revisé tu agenda.", "en": "Checked your calendar."},
+    "TravelAgent":      {"es": "Te digo cuándo salir.", "en": "I'll tell you when to leave."},
+    "WeatherAgent":     {"es": "Aquí el clima.", "en": "Here's the weather."},
+    "AmbiguityAgent":   {"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
+    "GreetingAgent":    {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
+    "TypeClarifyAgent": {"es": "¿Es una cita en tu agenda o un gasto? 🗓️", "en": "Is this a calendar appointment or an expense? 🗓️"},
 }
 
 _NEEDS_CURRENCY = {
     "es": "👌 Anotado. ¿En qué moneda fue? (COP, USD o EUR)",
     "en": "👌 Got it. Which currency was that? (COP, USD, or EUR)",
+}
+
+_TYPE_CLARIFY_COPY = {
+    "es": "¿'{title}' es una cita en tu agenda o un gasto? 🗓️",
+    "en": "Is '{title}' a calendar appointment or an expense? 🗓️",
+    "es_no_title": "¿Es una cita en tu agenda o un gasto? 🗓️",
+    "en_no_title": "Is this a calendar appointment or an expense? 🗓️",
 }
 
 # Separate error messages for when the agent itself failed (expense not saved, etc.)
@@ -463,6 +473,14 @@ def format_response(result: AgentResult, user: dict) -> str:
         return _TRAVEL_REMINDER_CONFIRMED_COPY.get(lang, _TRAVEL_REMINDER_CONFIRMED_COPY["es"])
     if agent == "TravelAgent" and result.success and data_type == "travel_reminder_aborted":
         return _TRAVEL_REMINDER_ABORTED_COPY.get(lang, _TRAVEL_REMINDER_ABORTED_COPY["es"])
+
+    # Calendar-or-expense disambiguation — hardcoded question, no LLM call.
+    if agent == "TypeClarifyAgent" and result.success and data_type == "expense_or_calendar_clarify":
+        title = data.get("event_title") or ""
+        if title:
+            key = lang if lang in ("es", "en") else "es"
+            return _TYPE_CLARIFY_COPY[key].format(title=title)
+        return _TYPE_CLARIFY_COPY.get(f"{lang}_no_title", _TYPE_CLARIFY_COPY["es_no_title"])
 
     # Out-of-scope capability request — hardcoded warm response, no LLM call.
     # Tells the user we can't do this yet and that we're adding it to our backlog.

@@ -9,12 +9,15 @@ from app.agents.summary_agent import SummaryAgent
 from app.agents.weather_agent import WeatherAgent
 from app.agents.ambiguity_agent import AmbiguityAgent
 from app.agents.greeting_agent import GreetingAgent
+from app.agents.type_clarify_agent import TypeClarifyAgent
 from app.agents.list_agent import ListAgent
 from app.router.route_decision import Disambiguation, RouteDecision
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
-CALENDAR_KEYWORDS  = {"calendario", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
-WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio"}
+CALENDAR_KEYWORDS  = {"calendario", "calendar", "agenda", "reunion", "reunión", "meeting", "event", "evento", "tengo", "schedule", "have", "day", "busy"}
+WEATHER_KEYWORDS   = {"clima", "weather", "lluvia", "temperatura", "temperature", "rain", "calor", "frio",
+                       "llover", "lloverá", "llueve", "raining",
+                       "be hot", "is it hot", "too hot", "so hot", "how hot", "getting hot"}
 SUMMARY_KEYWORDS   = {"resumen", "summary", "cuanto", "cuánto", "gaste", "gasté", "spent", "gastos", "expenses",
                        "wasted", "waste", "spend", "money", "dinero", "plata", "gastado"}
 TRAVEL_KEYWORDS    = {"llegar", "llego", "tráfico", "trafico", "traffic", "travel", "arrive", "salir", "leave"}
@@ -30,12 +33,14 @@ CREATE_KEYWORDS    = {
     "crear una", "crear un", "crear el", "crear mi", "crear la",
     "agrega", "agrega una", "agrega un", "agrega el", "agrega mi",
     "agregar al calendario", "añade al calendario", "añadir al calendario",
+    "programa", "programar",
     "programa una", "programa un", "programar una", "programar un",
     "nueva reunión", "nuevo evento",
     # English
     "add event", "add a meeting", "add an event",
     "create event", "create meeting", "create a meeting", "create an event",
     "schedule a", "schedule an", "schedule my",
+    "program a", "program an", "program my",
     "book a", "book an", "book me",
     "set up a meeting", "new meeting", "new event",
     "put it on my calendar", "add to my calendar",
@@ -68,6 +73,18 @@ def _pick_keyword_agent(parsed: ParsedMessage, signals: set) -> Optional[BaseAge
     (caller falls back to AmbiguityAgent). Extracted into its own function so
     `route()` can compare the keyword-match to a separate list-pattern match.
     """
+    # Small whole number (1–24) + LLM-extracted event title + no expense category
+    # hint = the number is almost certainly a clock time, not an expense amount.
+    # Ask the user to confirm: calendar appointment or expense? Must run BEFORE
+    # the generic ExpenseAgent rule since both trigger on `amount is not None`.
+    if (parsed.amount is not None
+            and parsed.amount == int(parsed.amount)
+            and 1 <= parsed.amount <= 24
+            and bool(parsed.event_title)
+            and parsed.event_start is None
+            and parsed.category_hint is None):
+        return TypeClarifyAgent()
+
     if parsed.amount is not None:
         return ExpenseAgent()
 
@@ -76,6 +93,13 @@ def _pick_keyword_agent(parsed: ParsedMessage, signals: set) -> Optional[BaseAge
 
     if signals & WEATHER_KEYWORDS:
         return WeatherAgent()
+
+    # Full calendar event extracted by parser — unambiguously a creation intent.
+    # Checked before SUMMARY so a message that mentions "dinero" while describing
+    # an appointment (e.g. "...no es un gasto, quiero que agregues al calendario...")
+    # isn't hijacked by SummaryAgent.
+    if parsed.event_title and parsed.event_start:
+        return CalendarAgent()
 
     if signals & SUMMARY_KEYWORDS:
         return SummaryAgent()
@@ -105,17 +129,20 @@ def route(parsed: ParsedMessage, *, skip_list: bool = False) -> RouteDecision:
     Disambiguation when two candidates match.
 
     Priority order (no exceptions):
-      0. reminder toggle phrase  → CalendarAgent    (settings — wins over lists too)
-      1. amount present          → ExpenseAgent
-      2. travel keyword          → TravelAgent
-      3. weather keyword         → WeatherAgent
-      4. summary keyword         → SummaryAgent    (specific money words beat generic calendar words)
-      5. calendar keyword        → CalendarAgent
-      6. create keyword          → CalendarAgent    (event creation intent with no calendar noun)
-      7. event_reference present → CalendarAgent    (ordinal/next follow-ups with no keyword)
-      8. greeting keyword        → GreetingAgent
-      9. gratitude keyword       → GreetingAgent
-     10. fallback                → AmbiguityAgent
+      0.  reminder toggle phrase                   → CalendarAgent    (settings — wins over lists too)
+      0.5 ListAgent.matches                         → ListAgent | Disambiguation (see below)
+      1a. small int amount + event_title + no hint → TypeClarifyAgent (ambiguous: clock time or expense?)
+      1b. amount present                           → ExpenseAgent
+      2.  travel keyword                           → TravelAgent
+      3.  weather keyword                          → WeatherAgent
+      4.  event_title + event_start set            → CalendarAgent    (parser extracted a new event but no keyword matched)
+      5.  summary keyword                          → SummaryAgent     (specific money words beat generic calendar words)
+      6.  calendar keyword                         → CalendarAgent
+      7.  create keyword                           → CalendarAgent    (event creation intent with no calendar noun)
+      8.  event_reference present                  → CalendarAgent    (ordinal/next follow-ups with no keyword)
+      9.  greeting keyword                         → GreetingAgent
+      10. gratitude keyword                        → GreetingAgent
+      11. fallback                                 → AmbiguityAgent
 
     `skip_list`: reserved for the Gate-5 awaiting_disambiguation branch.
     When the user picks the non-list candidate, the gate re-calls this

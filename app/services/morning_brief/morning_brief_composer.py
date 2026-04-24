@@ -1,7 +1,7 @@
 from app.services.google_calendar import get_today_events_for_user, normalize_events
 from app.services.maps.maps_service import estimate_travel_info
 from app.models.morning_brief import MorningBriefData
-from app.services.weather.weather_service import get_weather_for_today
+from app.services.weather.weather_service import get_weather_for_today, get_rain_forecast
 
 
 def compose_morning_insights(user: dict) -> MorningBriefData:
@@ -21,8 +21,11 @@ def compose_morning_insights(user: dict) -> MorningBriefData:
     normalized_events = normalize_events(raw_events) if raw_events else []
     event_count = len(normalized_events)
 
-    # 3. Weather
+    # 3. Weather (current conditions + rain forecast)
     weather_info = get_weather_for_today(user_city=user_location, lang=lang)
+    rain_forecast = get_rain_forecast(user_city=user_location, lang=lang)
+    if not rain_forecast.get("error"):
+        weather_info["rain_probability_pct"] = rain_forecast.get("rain_probability_pct")
 
     # 4. First event + travel
     first_event = None

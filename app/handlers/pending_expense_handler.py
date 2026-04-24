@@ -50,6 +50,11 @@ def handle_pending_expense(inbound: InboundMessage, user: Optional[dict]) -> boo
     lang = (user.get("language") or "en").lower()
 
     if not currency:
+        # A reply longer than 4 words means the user moved on to a new topic.
+        # Drop the stash and let the normal pipeline handle it.
+        if len(text.split()) > 4:
+            update_user_context(phone, "pending_expense", None)
+            return False
         msg = (
             "Which currency was that? Reply with COP, USD, or EUR 🙏"
             if lang == "en"
