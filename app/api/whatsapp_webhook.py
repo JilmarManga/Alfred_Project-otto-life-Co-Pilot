@@ -13,7 +13,10 @@ from app.handlers.onboarding_handler import handle_onboarding
 from app.handlers.pending_expense_handler import handle_pending_expense
 from app.handlers.pending_type_clarify_handler import handle_pending_type_clarify
 from app.handlers.pending_event_handler import handle_pending_event
+from app.handlers.pending_list_handler import handle_pending_list
 from app.handlers.pending_travel_handler import handle_pending_travel
+from app.db.user_context_store import update_user_context
+from app.models.agent_result import AgentResult
 from app.parser.message_parser import parse_message
 from app.router.deterministic_router import route
 from app.responder.response_formatter import format_response
@@ -88,13 +91,38 @@ async def receive_webhook(request: Request) -> dict:
     if handle_pending_travel(inbound, user):
         return {"status": "pending_travel"}
 
+    if handle_pending_list(inbound, user):
+        return {"status": "pending_list"}
+
     # Enrich user dict with phone (Firestore doc.to_dict() doesn't include the doc ID)
     user["phone_number"] = phone
 
     try:
         parser_context = _build_parser_context(user)
         parsed = await parse_message(inbound.text, user_context=parser_context)  # Layer 1
-        agent  = route(parsed)                                                    # Layer 2
+        decision = route(parsed)                                                  # Layer 2
+
+        # Router returned two candidates — ask the user which action they meant
+        # and stash the original ParsedMessage so gate 5 can re-dispatch.
+        if decision.disambiguation:
+            update_user_context(phone, "pending_list", {
+                "step": "awaiting_disambiguation",
+                "candidates": list(decision.disambiguation.candidates),
+                "original_parsed": parsed,
+            })
+            synthetic = AgentResult(
+                agent_name="ListAgent",
+                success=True,
+                data={
+                    "type": "list_disambiguation",
+                    "candidates": list(decision.disambiguation.candidates),
+                },
+            )
+            reply = format_response(synthetic, user)
+            send_whatsapp_message(phone, reply)
+            return {"status": "list_disambiguation"}
+
+        agent  = decision.agent                                                   # Layer 2
         result = agent.execute(parsed, user)                                      # Layer 3
         reply  = format_response(result, user)                                    # Layer 4
         send_whatsapp_message(phone, reply)

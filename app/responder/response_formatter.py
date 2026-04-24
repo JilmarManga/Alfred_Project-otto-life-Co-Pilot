@@ -1,6 +1,8 @@
-import os
+import json
 import logging
+import os
 import random
+import re
 from datetime import datetime
 
 import openai
@@ -110,6 +112,7 @@ _ERROR_MESSAGES = {
     "TravelAgent":   {"es": "No pude calcular el viaje. Intenta de nuevo 🙏", "en": "Couldn't calculate travel time. Try again 🙏"},
     "WeatherAgent":  {"es": "No pude obtener el clima. Intenta de nuevo 🙏", "en": "Couldn't get the weather. Try again 🙏"},
     "GreetingAgent": {"es": "¡Hola! 🐙", "en": "Hey! 🐙"},
+    "ListAgent":     {"es": "No pude procesar tu lista. Intenta de nuevo 🙏", "en": "Couldn't process your list. Try again 🙏"},
 }
 
 # Error codes that beat the generic agent-level error message above.
@@ -151,6 +154,21 @@ _SPECIFIC_ERRORS = {
     "reminder_data_incomplete": {
         "es": "No pude crear el recordatorio — faltan datos del evento 🙏",
         "en": "Couldn't create the reminder — some event data was missing 🙏",
+    },
+    # ListAgent — static failure copy (data-driven list errors are handled
+    # by dedicated branches in format_response: list_not_found, list_cap_reached,
+    # empty_list).
+    "save_failed": {
+        "es": "No pude guardar eso en tu lista. Intenta de nuevo 🙏",
+        "en": "Couldn't save that to your list. Try again 🙏",
+    },
+    "delete_failed": {
+        "es": "No pude eliminar la lista. Intenta de nuevo 🙏",
+        "en": "Couldn't delete the list. Try again 🙏",
+    },
+    "missing_item": {
+        "es": "No entendí qué quieres guardar 🤔 Mándamelo otra vez.",
+        "en": "I couldn't tell what to save 🤔 Send it again?",
     },
 }
 
@@ -208,6 +226,193 @@ _OUT_OF_SCOPE_COPY = {
         "Not in my toolbox yet 🐙 but I'm adding it to what I'll learn next. I'll ping you once I can take it off your plate. Is there something else I can do for you?",
     ],
 }
+
+
+# ---- ListAgent hardcoded copy -------------------------------------------- #
+# Every rendering below uses Python .format() — no LLM is called from these
+# dicts, so {variable} placeholders are safe here. Hard Rule #11 only applies
+# inside FORMATTING_PROMPT (which is sent to the LLM).
+
+_LIST_LABEL_SUFFIX = {
+    "es": " — etiqueta: {label}",
+    "en": " — label: {label}",
+}
+
+_LIST_SAVED_COPY = {
+    "es": "Listo ✅ Guardé “{content}” en tu lista ‘{list_name}’{label_suffix}.",
+    "en": "Got it ✅ Saved “{content}” to your ‘{list_name}’ list{label_suffix}.",
+}
+
+_LIST_SAVED_DEDUPED_COPY = {
+    "es": "Ya lo tenías guardado en ‘{list_name}’ hace un momento — no lo añadí otra vez 👍",
+    "en": "You saved that to ‘{list_name}’ a moment ago — I didn't add it again 👍",
+}
+
+_LIST_CHOICE_REQUEST_COPY = {
+    "es": "¿En cuál lista lo guardo? Tienes: {names}.",
+    "en": "Which list should I save it to? You have: {names}.",
+}
+
+_LIST_DELETE_CONFIRM_COPY = {
+    "es": "¿Confirmas que quieres eliminar la lista ‘{list_name}’? {has_clause} y no se podrá recuperar.",
+    "en": "Confirm — delete the list ‘{list_name}’? {has_clause} and can't be recovered.",
+}
+_LIST_HAS_CLAUSE = {
+    "es": {"singular": "Tiene {n} item", "plural": "Tiene {n} items", "zero": "Está vacía"},
+    "en": {"singular": "It has {n} item", "plural": "It has {n} items", "zero": "It's empty"},
+}
+
+_LIST_DELETED_COPY = {
+    "es": "Listo, eliminé la lista ‘{list_name}’ 🗑️",
+    "en": "Done — I deleted the list ‘{list_name}’ 🗑️",
+}
+
+_LIST_CAP_REACHED_COPY = {
+    "es": "Ya tienes 3 listas ({names}). Borra una primero si quieres crear otra 📋",
+    "en": "You already have 3 lists ({names}). Delete one first if you want to create another 📋",
+}
+
+_LIST_NOT_FOUND_NONE_COPY = {
+    "es": "Todavía no tienes listas guardadas 📋 Dime qué guardar y te creo una.",
+    "en": "You don't have any saved lists yet 📋 Tell me what to save and I'll start one.",
+}
+_LIST_NOT_FOUND_ASK_COPY = {
+    "es": "¿Cuál lista quieres? Tienes: {names}.",
+    "en": "Which list do you mean? You have: {names}.",
+}
+_LIST_NOT_FOUND_MISS_COPY = {
+    "es": "No encontré una lista con ese nombre 🔎 Tienes: {names}.",
+    "en": "I couldn't find a list with that name 🔎 You have: {names}.",
+}
+
+_LIST_EMPTY_COPY = {
+    "es": "La lista ‘{list_name}’ está vacía 📭",
+    "en": "Your ‘{list_name}’ list is empty 📭",
+}
+
+_LIST_RECALL_HEADER_COPY = {
+    "es": "📋 {list_name}",
+    "en": "📋 {list_name}",
+}
+
+_LIST_DISAMBIG_COPY = {
+    "es": "No sé si quieres {action_a} o {action_b}. ¿Cuál?",
+    "en": "Not sure if you want to {action_a} or {action_b}. Which one?",
+}
+
+# Agent class name → short human action phrase for list_disambiguation.
+_DISAMBIG_ACTION_COPY = {
+    "ListAgent":     {"es": "guardarlo en una lista",    "en": "save it to a list"},
+    "ExpenseAgent":  {"es": "anotarlo como gasto",        "en": "log it as an expense"},
+    "CalendarAgent": {"es": "agregarlo al calendario",    "en": "add it to your calendar"},
+    "TravelAgent":   {"es": "calcular tiempo de viaje",   "en": "calculate travel time"},
+    "WeatherAgent":  {"es": "consultar el clima",         "en": "check the weather"},
+    "SummaryAgent":  {"es": "darte un resumen de gastos", "en": "get you an expense summary"},
+}
+
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _is_url(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_URL_RE.match(text.strip()))
+
+
+def _batch_describe_urls(urls: list, lang: str) -> list:
+    """One batched LLM call to produce a 3–6 word description per URL based
+    on domain/path only (no page fetch). Returns a list aligned with `urls`,
+    or [] on any failure — recall rendering must not block on LLM errors."""
+    if not urls:
+        return []
+    try:
+        lang_name = "Spanish" if lang == "es" else "English"
+        url_block = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(urls))
+        system_prompt = (
+            f"You describe URLs in {lang_name}. For each URL, give a 3–6 word "
+            f"description inferred from the domain and URL path only. Do NOT "
+            f"attempt to fetch the page. Return ONLY a JSON array of strings, "
+            f"one per URL, in the same order as provided. No preamble, no keys."
+        )
+        response = openai.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": url_block},
+            ],
+            temperature=0.0,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if content.startswith("```"):
+            content = re.sub(r"```[a-z]*", "", content).replace("```", "").strip()
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and len(parsed) == len(urls):
+            return [str(d).strip() for d in parsed]
+    except Exception as exc:
+        logger.warning("List recall URL describe failed: %s", exc)
+    return []
+
+
+def _has_clause(n: int, lang: str) -> str:
+    bucket = _LIST_HAS_CLAUSE.get(lang, _LIST_HAS_CLAUSE["es"])
+    if n == 0:
+        return bucket["zero"]
+    key = "singular" if n == 1 else "plural"
+    return bucket[key].format(n=n)
+
+
+def _format_names(names: list) -> str:
+    return ", ".join(f"‘{n}’" for n in names if n)
+
+
+def _render_list_recall(data: dict, lang: str) -> str:
+    """Deterministic numbered render of a recalled list. For URL items we
+    attempt one batched LLM describe call — fail-open: on any error, URLs
+    are rendered alone without descriptions."""
+    list_name = data.get("list_name") or ""
+    items = list(data.get("items") or [])
+
+    url_indices = [i for i, it in enumerate(items) if _is_url(it.get("content", ""))]
+    descriptions = {}
+    if url_indices:
+        urls = [items[i].get("content", "") for i in url_indices]
+        descs = _batch_describe_urls(urls, lang)
+        if descs and len(descs) == len(url_indices):
+            descriptions = dict(zip(url_indices, descs))
+
+    lines = [_LIST_RECALL_HEADER_COPY.get(lang, _LIST_RECALL_HEADER_COPY["es"]).format(list_name=list_name)]
+    for i, item in enumerate(items):
+        content = (item.get("content") or "").strip()
+        raw_label = item.get("label")
+        label_prefix = f"{raw_label}: " if raw_label else ""
+        if i in descriptions and descriptions[i]:
+            lines.append(f"{i + 1}. {label_prefix}{descriptions[i]} — {content}")
+        else:
+            lines.append(f"{i + 1}. {label_prefix}{content}")
+    return "\n".join(lines)
+
+
+def _render_list_disambiguation(candidates: list, lang: str) -> str:
+    """Show both candidate actions so the user can pick one."""
+    if len(candidates) < 2:
+        return _LIST_NOT_FOUND_ASK_COPY.get(lang, _LIST_NOT_FOUND_ASK_COPY["es"]).format(names="")
+    action_a = _DISAMBIG_ACTION_COPY.get(candidates[0], {}).get(lang) or candidates[0]
+    action_b = _DISAMBIG_ACTION_COPY.get(candidates[1], {}).get(lang) or candidates[1]
+    return _LIST_DISAMBIG_COPY.get(lang, _LIST_DISAMBIG_COPY["es"]).format(
+        action_a=action_a, action_b=action_b,
+    )
+
+
+def _render_list_not_found(data: dict, lang: str) -> str:
+    """Pick the right list_not_found variant from the data context."""
+    existing = [n for n in (data.get("existing_names") or []) if n]
+    requested = data.get("requested_name")
+    if not existing:
+        return _LIST_NOT_FOUND_NONE_COPY.get(lang, _LIST_NOT_FOUND_NONE_COPY["es"])
+    names = _format_names(existing)
+    if requested:
+        return _LIST_NOT_FOUND_MISS_COPY.get(lang, _LIST_NOT_FOUND_MISS_COPY["es"]).format(names=names)
+    return _LIST_NOT_FOUND_ASK_COPY.get(lang, _LIST_NOT_FOUND_ASK_COPY["es"]).format(names=names)
 
 
 def _format_time_for_clarify(iso_start: str, lang: str) -> str:
@@ -283,6 +488,42 @@ def format_response(result: AgentResult, user: dict) -> str:
         variants = _OUT_OF_SCOPE_COPY.get(lang, _OUT_OF_SCOPE_COPY["en"])
         return random.choice(variants)
 
+    # ListAgent success branches — every render below is deterministic
+    # (no LLM call) except list_recall's optional URL-describe helper.
+    if agent == "ListAgent" and result.success:
+        if data_type == "list_saved":
+            label_val = data.get("label")
+            label_suffix = (
+                _LIST_LABEL_SUFFIX.get(lang, _LIST_LABEL_SUFFIX["es"]).format(label=label_val)
+                if label_val else ""
+            )
+            return _LIST_SAVED_COPY.get(lang, _LIST_SAVED_COPY["es"]).format(
+                content=data.get("content_preview") or "",
+                list_name=data.get("list_name") or "",
+                label_suffix=label_suffix,
+            )
+        if data_type == "list_saved_deduped":
+            return _LIST_SAVED_DEDUPED_COPY.get(lang, _LIST_SAVED_DEDUPED_COPY["es"]).format(
+                list_name=data.get("list_name") or "",
+            )
+        if data_type == "list_choice_request":
+            return _LIST_CHOICE_REQUEST_COPY.get(lang, _LIST_CHOICE_REQUEST_COPY["es"]).format(
+                names=_format_names(data.get("list_names") or []),
+            )
+        if data_type == "list_delete_confirm":
+            return _LIST_DELETE_CONFIRM_COPY.get(lang, _LIST_DELETE_CONFIRM_COPY["es"]).format(
+                list_name=data.get("list_name") or "",
+                has_clause=_has_clause(int(data.get("item_count") or 0), lang),
+            )
+        if data_type == "list_deleted":
+            return _LIST_DELETED_COPY.get(lang, _LIST_DELETED_COPY["es"]).format(
+                list_name=data.get("list_name") or "",
+            )
+        if data_type == "list_recall":
+            return _render_list_recall(data, lang)
+        if data_type == "list_disambiguation":
+            return _render_list_disambiguation(data.get("candidates") or [], lang)
+
     # Special case: expense needs a currency answer — not a real error.
     if agent == "ExpenseAgent" and data.get("needs_currency"):
         return _NEEDS_CURRENCY.get(lang, _NEEDS_CURRENCY["en"])
@@ -290,6 +531,18 @@ def format_response(result: AgentResult, user: dict) -> str:
     # Agent failed — use distinct error message (not the success fallback).
     # Specific error codes beat the generic agent-level message.
     if not result.success:
+        # ListAgent data-driven failures rendered from the result's data
+        # context (existing_names, requested_name, list_name, item_count).
+        if agent == "ListAgent":
+            if result.error_message == "list_not_found":
+                return _render_list_not_found(data, lang)
+            if result.error_message == "list_cap_reached":
+                names = _format_names(data.get("existing_names") or [])
+                return _LIST_CAP_REACHED_COPY.get(lang, _LIST_CAP_REACHED_COPY["es"]).format(names=names)
+            if result.error_message == "empty_list":
+                return _LIST_EMPTY_COPY.get(lang, _LIST_EMPTY_COPY["es"]).format(
+                    list_name=data.get("list_name") or "",
+                )
         if result.error_message and result.error_message in _SPECIFIC_ERRORS:
             return _SPECIFIC_ERRORS[result.error_message].get(lang, _SPECIFIC_ERRORS[result.error_message]["es"])
         return _ERROR_MESSAGES.get(agent, {}).get(lang, "Algo salió mal. Intenta de nuevo 🙏" if lang == "es" else "Something went wrong. Try again 🙏")

@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 
 
@@ -19,3 +19,7 @@ class ParsedMessage(BaseModel):
     event_start: Optional[str] = Field(None, description="ISO 8601 start datetime with tz offset for the event to create.")
     event_location: Optional[str] = Field(None, description="Location for the event to create, if any.")
     event_duration_minutes: Optional[int] = Field(None, description="Event duration in minutes; default 60 applied at creation time.")
+    list_intent: Optional[Literal["save", "recall", "delete"]] = Field(None, description="User's list operation intent (save/recall/delete), or None.")
+    list_name: Optional[str] = Field(None, description="List name exactly as the user typed it — not normalized or translated.")
+    list_item: Optional[str] = Field(None, description="Content to save (URL or plain text), exactly as the user sent it.")
+    list_label: Optional[str] = Field(None, description="Optional short label the user attached to this specific item.")

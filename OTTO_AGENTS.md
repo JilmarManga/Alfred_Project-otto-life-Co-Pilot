@@ -153,7 +153,14 @@ WhatsApp POST /webhook
 
 ---
 
-## TravelAgent — reference implementation
+## Reference implementations
+
+Two agent packages already exist. Copy whichever is closer to the new agent's shape:
+
+- `app/agents/travel_agent/` — canonical example. External APIs (Maps/Calendar) and a two-step gate state machine.
+- `app/agents/list_agent/` — pure Firestore CRUD. No external APIs. Three-step gate (`_choice` / `awaiting_delete_confirmation` / `awaiting_disambiguation`). Exposes a `matches()` classmethod used by the router's pattern predicate — the first agent to route by pattern instead of keyword signals.
+
+### TravelAgent
 
 `app/agents/travel_agent/` is the canonical example of the pattern.
 
@@ -174,6 +181,27 @@ Gate: `app/handlers/pending_travel_handler.py` — two-step state machine (`awai
 Repository: `app/repositories/scheduled_reminder_repository.py` — `create`, `list_due_within`, `delete`.
 
 Cron delivery: `_run_departure_reminders()` in `app/api/cron_routes.py` (5th pass, 15-min cadence).
+
+### ListAgent
+
+`app/agents/list_agent/` — save/recall/delete user-defined named lists (3-list cap, 10-min dedup, destructive ops require confirmation).
+
+| File | Purpose |
+|---|---|
+| `__init__.py` | Re-exports `ListAgent`. |
+| `agent.py` | `_SKILLS` registry + `matches()` classmethod (save/recall/delete triggers + LLM `list_intent`). `_pick_skill_from_router` maps intent → skill; returns None to trigger a `missing_item` AgentResult. |
+| `skill_context.py` | `SkillContext` + `SkillResult`. |
+| `skills/base.py` | `ListSkill` ABC (no LLM, no WhatsApp, no formatting, Firestore allowed via `ListRepository`). |
+| `skills/save_to_list.py` | Resolves target list (explicit / auto-`guardados`-`saved` / 1-list direct / 2+ ask). Enforces 3-list cap. `sha256(content.strip().lower())` dedup within 10 min. |
+| `skills/recall_list.py` | Name lookup (case-insensitive). `empty_list` when found-but-empty. `list_not_found` with `existing_names` when missing or 0-/2+-list ambiguity. |
+| `skills/delete_list.py` | Stages a deletion — stashes `awaiting_delete_confirmation` with `list_id`. Never auto-picks. |
+| `skills/confirm_delete_list.py` | Gate-only entry. Deletes by `list_id` passed in `ctx.payload`. |
+
+Gate: `app/handlers/pending_list_handler.py` — three-step state machine.
+
+Repository: `app/repositories/list_repository.py` — `get_user_lists`, `find_list_by_name`, `count_user_lists`, `create_list`, `append_item`, `delete_list`.
+
+Router integration: `ListAgent.matches(parsed)` is the first agent to use a pattern predicate instead of `_scan_signals` keywords. The router's `route(parsed, *, skip_list=False) -> RouteDecision` returns either an agent or a `Disambiguation(["ListAgent", <keyword_agent>])`; gate 5 resolves disambiguation via `route(parsed, skip_list=True)`.
 
 ---
 
