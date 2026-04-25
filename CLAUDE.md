@@ -233,6 +233,14 @@ Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). 
 3. 1h event reminders — `get_upcoming_events_window(token, 55, 75)`. Dedup via `notified_event_ids` (`{eventId}:{local_date}`). Skip all-day events.
 4. Morning brief — check local time 06:00–06:14. If `morning_brief_sent_date != today_local` → compose + send (calendar + weather + travel). Write `morning_brief_sent_date`.
 
+**Operator broadcast** (`api/admin_routes.py`):
+- `POST /admin/broadcasts` — protected by the same `X-Cron-Secret` header as `/cron/*`. Sync handler so FastAPI runs it in a threadpool (event loop stays free during fan-out).
+- Payload: `{recipients: [phone, ...] | "all", body_es: str, body_en: str, confirm_all?: bool}`. `confirm_all=true` is required when `recipients == "all"` (typo guard).
+- Per recipient, picks `body_es` or `body_en` from `user["language"]`. Skips users not in onboarding `completed` state. Uses `send_whatsapp_message_with_status` so the response counts true HTTP-200s vs failures.
+- Response: `{sent, failed, skipped_not_onboarded, skipped_unknown, errors[]}`.
+- **Beta caveat:** free-form text only works because Meta-provided test numbers don't enforce the 24-hour customer-service window. Production WABA migration must move broadcasts to approved message templates.
+- **Pending-state caveat:** a broadcast arriving while a user is in a pending gate (`pending_expense`, `pending_event`, `pending_travel`, `pending_list`, `pending_type_clarify`) can be interpreted by the gate as the next user reply. Pending state is in-memory and short-lived — at worst the user re-sends. Prefer broadcasting at low-traffic times.
+
 ---
 
 ## Firestore Collections
@@ -296,7 +304,8 @@ app/
 ├── api/
 │   ├── whatsapp_webhook.py          # Thin dispatcher: verify, normalize, gates, 4-layer pipeline
 │   ├── oauth_routes.py              # /auth/google/authorize|callback|done
-│   └── cron_routes.py               # /cron/oauth-followups (X-Cron-Secret protected)
+│   ├── cron_routes.py               # /cron/oauth-followups (X-Cron-Secret protected)
+│   └── admin_routes.py              # /admin/broadcasts (X-Cron-Secret protected)
 ├── parser/
 │   ├── message_parser.py            # Layer 1
 │   ├── word_number_parser.py        # "dos millones"→2000000
@@ -348,7 +357,7 @@ app/
 │   ├── morning_brief/
 │   ├── message_router.py
 │   ├── inbound_message_mapper.py
-│   └── whatsapp_sender.py
+│   └── whatsapp_sender.py           # send_whatsapp_message (fire-and-forget) + send_whatsapp_message_with_status (returns bool)
 ├── scripts/
 │   ├── reauthorize_calendar.py
 │   └── run_morning_brief.py
