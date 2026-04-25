@@ -289,3 +289,30 @@ class UserRepository:
             user_phone_number,
             {"morning_brief_sent_date": local_date_iso},
         )
+
+    # --- Operator broadcast helpers ---
+
+    @staticmethod
+    def list_onboarded_users() -> List[Dict]:
+        """
+        Users who have finished onboarding. Honors both the new state machine
+        (`onboarding_state == "completed"`) and the legacy flag
+        (`onboarding_completed=True` with no `onboarding_state` field) per
+        CLAUDE.md "Legacy compat" note. Used by the operator broadcast endpoint.
+
+        Beta-scale: full collection scan. When user count grows, replace with a
+        Firestore-side `where("onboarding_state", "==", "completed")` query plus
+        a separate legacy-flag query, unioned in Python.
+        """
+        results: List[Dict] = []
+        for doc in db.collection(UserRepository.COLLECTION_NAME).stream():
+            data = doc.to_dict() or {}
+            is_completed = (
+                data.get("onboarding_state") == "completed"
+                or (data.get("onboarding_completed") is True and not data.get("onboarding_state"))
+            )
+            if not is_completed:
+                continue
+            data["phone"] = doc.id
+            results.append(data)
+        return results
