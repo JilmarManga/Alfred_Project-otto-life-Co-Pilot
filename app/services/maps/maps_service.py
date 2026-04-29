@@ -30,7 +30,7 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
             "key": GOOGLE_MAPS_API_KEY,
         }
 
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         data = response.json()
 
         routes = data.get("routes", [])
@@ -102,7 +102,7 @@ def estimate_travel_info(destination: str, departure_time_iso: str, origin: str 
             "key": GOOGLE_MAPS_API_KEY,
         }
 
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         data = response.json()
 
         routes = data.get("routes", [])

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(run_cron_job, CronTrigger(minute="0,15,30,45"), id="cron_job")
+    scheduler.add_job(run_cron_job, CronTrigger(minute="0,15,30,45"), id="cron_job", misfire_grace_time=900)
     scheduler.start()
     logger.info("Scheduler started — cron_job every 15 min at :00/:15/:30/:45")
     yield

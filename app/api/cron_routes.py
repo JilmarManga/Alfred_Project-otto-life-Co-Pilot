@@ -125,9 +125,9 @@ def _run_event_reminders() -> int:
 # --- Morning brief helpers ---
 
 def _is_morning_brief_window(tz: ZoneInfo) -> bool:
-    """Return True if the user's local time is between 06:00 and 06:14 (two 15-min cron ticks)."""
+    """Return True if the user's local time is 06:00–06:29 (covers two consecutive cron ticks)."""
     local_now = datetime.now(tz)
-    return local_now.hour == 6 and local_now.minute < 15
+    return local_now.hour == 6 and local_now.minute < 30
 
 
 def _run_morning_briefs() -> int:
@@ -159,9 +159,12 @@ def _run_morning_briefs() -> int:
 
         try:
             user["_refresh_token"] = refresh_token
-            run_morning_briefing(user)
-            UserRepository.mark_morning_brief_sent(phone, local_today)
-            sent += 1
+            delivered = run_morning_briefing(user)
+            if delivered:
+                UserRepository.mark_morning_brief_sent(phone, local_today)
+                sent += 1
+            else:
+                logger.warning("Morning brief: WhatsApp send rejected for %s — will retry next tick", phone)
         except Exception as exc:
             logger.exception("Morning brief: send failed for %s: %s", phone, exc)
 

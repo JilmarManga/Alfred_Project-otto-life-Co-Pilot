@@ -25,12 +25,17 @@ def send_whatsapp_message(to: str, message: str):
         },
     }
 
-    response = requests.post(url, headers=headers, json=payload)
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+    except requests.RequestException as exc:
+        print(f"❌ Error sending message (network): {exc}")
+        return False
 
     if response.status_code != 200:
         print("❌ Error sending message:", response.text)
-    else:
-        print(response.text)
+        return False
+    print(response.text)
+    return True
 
 
 def send_whatsapp_message_with_status(to: str, message: str) -> tuple[bool, str]:
