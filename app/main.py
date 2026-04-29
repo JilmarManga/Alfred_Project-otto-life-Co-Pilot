@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.whatsapp_webhook import router as whatsapp_router
 from app.api.oauth_routes import router as oauth_router
 from app.api.cron_routes import router as cron_router, run_cron_job
+from app.api.admin_routes import router as admin_router
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 app.include_router(whatsapp_router, prefix="", tags=["WhatsApp Webhook"])
 app.include_router(oauth_router, prefix="", tags=["Google OAuth"])
 app.include_router(cron_router, prefix="", tags=["Cron"])
+app.include_router(admin_router, prefix="", tags=["Admin"])
 
 
 @app.get("/")
