@@ -1,4 +1,5 @@
 import logging
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -86,15 +87,32 @@ _QUERY_ERROR = {
 _MAX_CONFIRMATION_WORDS = 6
 
 
+def _strip_accents(s: str) -> str:
+    """Remove combining marks so 'créate' matches 'create', 'agéndalo' matches
+    'agendalo', etc. iOS Spanish autocorrect frequently inserts/relocates
+    accents on short confirmation replies."""
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+# Pre-compute accent-stripped keyword sets at import time. Both the user's
+# input and the keywords are normalized so matches are accent-insensitive.
+_STRONG_AFFIRM_PHRASES_NORM = {_strip_accents(p) for p in _STRONG_AFFIRM_PHRASES}
+_AFFIRMATIVE_KEYWORDS_NORM = {_strip_accents(k) for k in _AFFIRMATIVE_KEYWORDS}
+_QUERY_KEYWORDS_NORM = {_strip_accents(k) for k in _QUERY_KEYWORDS}
+_ABORT_KEYWORDS_NORM = {_strip_accents(k) for k in _ABORT_KEYWORDS}
+
+
 def _classify_intent(text: str) -> str:
     """Return one of: 'affirm', 'query', 'abort', 'other'."""
     lower = (text or "").lower().strip()
     if not lower:
         return "other"
+    norm = _strip_accents(lower)
 
     # Strong creation phrases bypass the word-length gate — the user is
     # explicitly confirming they want this added to the calendar.
-    if any(phrase in lower for phrase in _STRONG_AFFIRM_PHRASES):
+    if any(phrase in norm for phrase in _STRONG_AFFIRM_PHRASES_NORM):
         return "affirm"
 
     if len(lower.split()) > _MAX_CONFIRMATION_WORDS:
@@ -104,11 +122,11 @@ def _classify_intent(text: str) -> str:
     # Abort wins because "no" alone is an explicit rejection of both options.
     # Query wins over affirm because phrases like "solo ver" contain "ver"
     # and should not be ambiguous with affirm keywords.
-    if any(kw in lower for kw in _ABORT_KEYWORDS):
+    if any(kw in norm for kw in _ABORT_KEYWORDS_NORM):
         return "abort"
-    if any(kw in lower for kw in _QUERY_KEYWORDS):
+    if any(kw in norm for kw in _QUERY_KEYWORDS_NORM):
         return "query"
-    if any(kw in lower for kw in _AFFIRMATIVE_KEYWORDS):
+    if any(kw in norm for kw in _AFFIRMATIVE_KEYWORDS_NORM):
         return "affirm"
     return "other"
 
