@@ -125,7 +125,8 @@ async def receive_webhook(request: Request) -> dict:
         agent  = decision.agent                                                   # Layer 2
         result = agent.execute(parsed, user)                                      # Layer 3
         reply  = format_response(result, user)                                    # Layer 4
-        send_whatsapp_message(phone, reply)
+        if reply:
+            send_whatsapp_message(phone, reply)
 
         # Optional second message for agents that return a follow_up_message
         # (e.g. CalendarAgent creation → "¿Quieres más detalles?").

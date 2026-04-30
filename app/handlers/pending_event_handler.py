@@ -7,7 +7,9 @@ from app.db.user_context_store import get_user_context, update_user_context
 from app.models.agent_result import AgentResult
 from app.models.inbound_message import InboundMessage
 from app.responder.response_formatter import format_response
+from app.services.calendar_reconnect import handle_token_invalid
 from app.services.google_calendar import (
+    CalendarTokenInvalid,
     create_event_for_user,
     format_events_detailed,
     get_today_events_for_user,
@@ -197,6 +199,11 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
                 timezone_str=tz_str,
                 location=pending.get("location"),
             )
+        except CalendarTokenInvalid as exc:
+            logger.warning("Calendar token invalid for %s on create: %s", phone, exc)
+            update_user_context(phone, "pending_event", None)
+            handle_token_invalid(phone, lang)
+            return True
         except Exception as exc:
             logger.exception("Pending event creation failed for %s: %s", phone, exc)
             send_whatsapp_message(phone, _CREATE_ERROR.get(lang, _CREATE_ERROR["es"]))
@@ -240,6 +247,11 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
         )
         reply = format_response(result, user_for_formatter)
         send_whatsapp_message(phone, reply)
+    except CalendarTokenInvalid as exc:
+        logger.warning("Calendar token invalid for %s on query: %s", phone, exc)
+        update_user_context(phone, "pending_event", None)
+        handle_token_invalid(phone, lang)
+        return True
     except Exception as exc:
         logger.exception("Pending event query failed for %s: %s", phone, exc)
         send_whatsapp_message(phone, _QUERY_ERROR.get(lang, _QUERY_ERROR["es"]))

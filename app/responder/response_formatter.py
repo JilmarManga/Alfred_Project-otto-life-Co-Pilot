@@ -468,6 +468,11 @@ def format_response(result: AgentResult, user: dict) -> str:
     if agent == "CalendarAgent" and result.success and data_type == "reminder_opt_in":
         return _REMINDER_OPT_IN_COPY.get(lang, _REMINDER_OPT_IN_COPY["es"])
 
+    # Token-invalid reconnect already DM'd the user from the agent layer —
+    # signal "no further reply" with an empty string. Webhook drops empty replies.
+    if agent == "CalendarAgent" and result.success and data_type == "calendar_token_invalid_handled":
+        return ""
+
     # Travel reminder confirmed / aborted — hardcoded, no LLM call.
     if agent == "TravelAgent" and result.success and data_type == "travel_reminder_confirmed":
         return _TRAVEL_REMINDER_CONFIRMED_COPY.get(lang, _TRAVEL_REMINDER_CONFIRMED_COPY["es"])
