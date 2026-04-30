@@ -1,10 +1,18 @@
 import datetime
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from app.services.morning_brief.message_builder import format_time_human
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+
+class CalendarTokenInvalid(Exception):
+    """Stored refresh token can no longer be exchanged for an access token
+    (revoked by user, expired due to OAuth-app Testing-mode 7-day TTL, password
+    change, scope change, 6-month inactivity). Callers should clear the user's
+    credentials and route them through the reconnect flow."""
 
 # Function to normalize events into a consistent format
 def normalize_events(events):
@@ -117,7 +125,10 @@ def get_calendar_service_for_user(refresh_token: str):
         client_secret=os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
         scopes=SCOPES,
     )
-    creds.refresh(Request())
+    try:
+        creds.refresh(Request())
+    except RefreshError as exc:
+        raise CalendarTokenInvalid(str(exc)) from exc
     return build("calendar", "v3", credentials=creds)
 
 

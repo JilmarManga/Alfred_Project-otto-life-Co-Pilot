@@ -117,6 +117,18 @@ class UserRepository:
         )
 
     @staticmethod
+    def clear_calendar_credentials(user_phone_number: str) -> None:
+        """Wipe the stored refresh token after Google rejects it. Paired with
+        the reconnect flow so a stale token can never be retried."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {
+                "google_calendar_refresh_token": None,
+                "google_calendar_connected": False,
+            },
+        )
+
+    @staticmethod
     def mark_oauth_link_sent(user_phone_number: str, followup_delay_hours: int = 3) -> None:
         """Record when the OAuth link was sent and schedule the 3h followup."""
         now = datetime.utcnow()

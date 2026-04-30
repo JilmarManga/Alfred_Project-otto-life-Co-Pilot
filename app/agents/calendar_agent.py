@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 from app.agents.base_agent import BaseAgent
 from app.models.parsed_message import ParsedMessage
 from app.models.agent_result import AgentResult
+from app.services.calendar_reconnect import handle_token_invalid
 from app.services.google_calendar import (
+    CalendarTokenInvalid,
     get_today_events_for_user,
     normalize_events,
     summarize_day,
@@ -99,6 +101,15 @@ class CalendarAgent(BaseAgent):
 
             return self._handle_query(phone, refresh_token)
 
+        except CalendarTokenInvalid as e:
+            logger.warning("Calendar token invalid for %s: %s", phone, e)
+            lang = (user.get("language") or "es").lower()
+            handle_token_invalid(phone, lang)
+            return AgentResult(
+                agent_name="CalendarAgent",
+                success=True,
+                data={"type": "calendar_token_invalid_handled"},
+            )
         except ValueError as e:
             if str(e) == "calendar_not_connected":
                 return AgentResult(
