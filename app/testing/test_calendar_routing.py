@@ -29,7 +29,7 @@ def test_what_about_the_second_routes_to_calendar():
         signals=[],
         event_reference=EventReference(index=1),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 def test_how_is_my_day_today_routes_to_calendar():
@@ -38,7 +38,7 @@ def test_how_is_my_day_today_routes_to_calendar():
         raw_message="How is my day today?",
         signals=_scan_signals("How is my day today?"),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 def test_what_do_i_have_today_routes_to_calendar():
@@ -47,7 +47,7 @@ def test_what_do_i_have_today_routes_to_calendar():
         raw_message="What do I have today?",
         signals=_scan_signals("What do I have today?"),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def test_que_tengo_hoy_routes_to_calendar():
         raw_message="Qué tengo hoy?",
         signals=_scan_signals("Qué tengo hoy?"),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 def test_ordinal_followup_spanish_routes_to_calendar():
@@ -70,7 +70,7 @@ def test_ordinal_followup_spanish_routes_to_calendar():
         signals=[],
         event_reference=EventReference(index=2),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 def test_digit_ordinal_routes_to_calendar():
@@ -80,7 +80,7 @@ def test_digit_ordinal_routes_to_calendar():
         signals=[],
         event_reference=EventReference(index=6),
     )
-    assert isinstance(route(parsed), CalendarAgent)
+    assert isinstance(route(parsed).agent, CalendarAgent)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ def test_have_spent_routes_to_summary_not_calendar():
         raw_message="How much have I spent this week?",
         signals=_scan_signals("How much have I spent this week?"),
     )
-    assert isinstance(route(parsed), SummaryAgent)
+    assert isinstance(route(parsed).agent, SummaryAgent)
 
 
 def test_cuanto_gaste_routes_to_summary():
@@ -102,7 +102,7 @@ def test_cuanto_gaste_routes_to_summary():
         raw_message="Cuánto gasté esta semana?",
         signals=_scan_signals("Cuánto gasté esta semana?"),
     )
-    assert isinstance(route(parsed), SummaryAgent)
+    assert isinstance(route(parsed).agent, SummaryAgent)
 
 
 # ---------------------------------------------------------------------------

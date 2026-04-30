@@ -73,39 +73,39 @@ def test_hot_phrases_in_weather_keywords():
 
 def test_va_a_llover_routes_to_weather():
     parsed = make_parsed("va a llover hoy?")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 def test_llueve_routes_to_weather():
     parsed = make_parsed("llueve ahorita?")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 def test_is_it_going_to_rain_routes_to_weather():
     parsed = make_parsed("is it going to rain today?")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 def test_will_it_be_hot_routes_to_weather():
     parsed = make_parsed("will it be hot today?")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 def test_como_va_el_clima_routes_to_weather():
     parsed = make_parsed("como va a estar el clima hoy")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 def test_va_a_hacer_calor_routes_to_weather():
     parsed = make_parsed("Va a hacer calor hoy?")
-    assert type(route(parsed)).__name__ == "WeatherAgent"
+    assert type(route(parsed).agent).__name__ == "WeatherAgent"
 
 
 # ── 4. Routing: hot phrases do NOT break hotel/shot ────────────────────────
 
 def test_book_a_hotel_routes_to_calendar_not_weather():
     parsed = make_parsed("book a hotel room")
-    agent_name = type(route(parsed)).__name__
+    agent_name = type(route(parsed).agent).__name__
     assert agent_name != "WeatherAgent", "book a hotel should not route to WeatherAgent"
 
 
