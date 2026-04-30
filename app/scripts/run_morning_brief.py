@@ -1,7 +1,13 @@
+from app.repositories.user_repository import UserRepository
 from app.services.morning_briefing import run_morning_briefing
+from app.services.token_crypto import decrypt
 
-# Replace with your real number (later this becomes dynamic)
-USER_PHONE = "573043775520"
+USER_PHONE = "+573043775520"
 
 if __name__ == "__main__":
-    run_morning_briefing(USER_PHONE)
+    user = UserRepository.get_user(USER_PHONE)
+    if not user:
+        raise SystemExit(f"No user for {USER_PHONE}")
+    user["phone"] = USER_PHONE
+    user["_refresh_token"] = decrypt(user["google_calendar_refresh_token"])
+    run_morning_briefing(user)

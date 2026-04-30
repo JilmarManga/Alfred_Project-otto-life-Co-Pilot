@@ -125,15 +125,15 @@ def _run_event_reminders() -> int:
 # --- Morning brief helpers ---
 
 def _is_morning_brief_window(tz: ZoneInfo) -> bool:
-    """Return True if the user's local time is between 06:00 and 06:14 (two 15-min cron ticks)."""
+    """Return True if the user's local time is 06:00–06:29 (covers two consecutive cron ticks)."""
     local_now = datetime.now(tz)
-    return local_now.hour == 6 and local_now.minute < 15
+    return local_now.hour == 6 and local_now.minute < 30
 
 
 def _run_morning_briefs() -> int:
     """
     For each user with calendar connected and reminders enabled, check if it's
-    their local 6:00–6:14 and they haven't received the brief today. Sends one
+    their local 6:00–6:29 and they haven't received the brief today. Sends one
     brief per user per local day. Returns the number of briefs sent.
     """
     sent = 0
@@ -159,9 +159,12 @@ def _run_morning_briefs() -> int:
 
         try:
             user["_refresh_token"] = refresh_token
-            run_morning_briefing(user)
-            UserRepository.mark_morning_brief_sent(phone, local_today)
-            sent += 1
+            delivered = run_morning_briefing(user)
+            if delivered:
+                UserRepository.mark_morning_brief_sent(phone, local_today)
+                sent += 1
+            else:
+                logger.warning("Morning brief: WhatsApp send rejected for %s — will retry next tick", phone)
         except Exception as exc:
             logger.exception("Morning brief: send failed for %s: %s", phone, exc)
 
@@ -218,7 +221,7 @@ def run_cron_job() -> dict:
          minting a fresh state token so the link is actually clickable.
       2. Retries location resolution for users whose geocoding failed during onboarding.
       3. Sends 1-hour reminders for upcoming calendar events.
-      4. Sends the morning brief to users whose local time is 6:00–6:14.
+      4. Sends the morning brief to users whose local time is 6:00–6:29.
       5. Delivers one-off departure reminders scheduled by TravelAgent.
     """
     followups_sent = 0

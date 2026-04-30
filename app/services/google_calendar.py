@@ -6,43 +6,6 @@ from app.services.morning_brief.message_builder import format_time_human
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-# Function to get the Google Calendar service
-def get_calendar_service():
-    creds = Credentials.from_authorized_user_file(
-        "credentials/token.json",
-        SCOPES
-    )
-    if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open("credentials/token.json", "w") as f:
-            f.write(creds.to_json())
-    service = build("calendar", "v3", credentials=creds)
-    return service
-
-
-# Function to get today's events from Google Calendar
-def get_today_events():
-    service = get_calendar_service()
-
-    now = datetime.datetime.utcnow().isoformat() + "Z"
-    end = (datetime.datetime.utcnow() + datetime.timedelta(days=1)).isoformat() + "Z"
-
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=now,
-        timeMax=end,
-        singleEvents=True,
-        orderBy="startTime",
-    ).execute()
-
-    events = events_result.get("items", [])
-
-    for event in events:
-        print("Calendar Event:", event.get("summary"), event.get("start"))
-
-    return events
-
-
 # Function to normalize events into a consistent format
 def normalize_events(events):
     normalized = []
