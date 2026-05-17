@@ -123,6 +123,85 @@ class UserRepository:
             },
         )
 
+    # --- Google Drive OAuth (fully isolated from calendar OAuth) ---
+    #
+    # Drive deliberately uses its own state-token namespace. Sharing
+    # `google_oauth_state_token` would let the calendar callback resolve a
+    # Drive consent and mis-write a calendar account. None of these methods
+    # touch any calendar/connected_accounts field.
+
+    @staticmethod
+    def set_drive_oauth_state_token(
+        user_phone_number: str,
+        state_token: str,
+        expires_at: datetime,
+        code_verifier: Optional[str] = None,
+    ) -> None:
+        """Store an opaque single-use Drive OAuth state token + PKCE verifier."""
+        data = {
+            "google_drive_oauth_state_token": state_token,
+            "google_drive_oauth_state_expires_at": expires_at,
+        }
+        if code_verifier:
+            data["google_drive_oauth_code_verifier"] = code_verifier
+        UserRepository.create_or_update_user(user_phone_number, data)
+
+    @staticmethod
+    def get_user_by_drive_oauth_state(state_token: str) -> Optional[Dict]:
+        """Look up a user by their current Drive OAuth state token. Returns the
+        user dict with `phone` merged in, or None if not found / expired."""
+        query = (
+            db.collection(UserRepository.COLLECTION_NAME)
+            .where(filter=FieldFilter("google_drive_oauth_state_token", "==", state_token))
+            .limit(1)
+        )
+        for doc in query.stream():
+            data = doc.to_dict() or {}
+            expires_at = data.get("google_drive_oauth_state_expires_at")
+            if expires_at and hasattr(expires_at, "timestamp"):
+                if datetime.utcnow().timestamp() > expires_at.timestamp():
+                    return None
+            data["phone"] = doc.id
+            return data
+        return None
+
+    @staticmethod
+    def clear_drive_oauth_state(user_phone_number: str) -> None:
+        """Wipe the one-time Drive OAuth state fields after a successful callback."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {
+                "google_drive_oauth_state_token": None,
+                "google_drive_oauth_state_expires_at": None,
+                "google_drive_oauth_code_verifier": None,
+            },
+        )
+
+    @staticmethod
+    def save_drive_credentials(
+        user_phone_number: str, encrypted_refresh_token: str
+    ) -> None:
+        """Persist the encrypted per-user Google Drive refresh token."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {
+                "google_drive_refresh_token": encrypted_refresh_token,
+                "google_drive_connected": True,
+            },
+        )
+
+    @staticmethod
+    def clear_drive_credentials(user_phone_number: str) -> None:
+        """Wipe the stored Drive refresh token after Google rejects it, so a
+        stale token can never be retried."""
+        UserRepository.create_or_update_user(
+            user_phone_number,
+            {
+                "google_drive_refresh_token": None,
+                "google_drive_connected": False,
+            },
+        )
+
     # --- Multi-provider connected accounts (max 2, any provider mix) ---
 
     MAX_CONNECTED_ACCOUNTS = 2

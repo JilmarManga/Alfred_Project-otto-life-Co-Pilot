@@ -203,6 +203,28 @@ Repository: `app/repositories/list_repository.py` — `get_user_lists`, `find_li
 
 Router integration: `ListAgent.matches(parsed)` is the first agent to use a pattern predicate instead of `_scan_signals` keywords. The router's `route(parsed, *, skip_list=False) -> RouteDecision` returns either an agent or a `Disambiguation(["ListAgent", <keyword_agent>])`; gate 5 resolves disambiguation via `route(parsed, skip_list=True)`.
 
+### DriveAgent
+
+`app/agents/drive_agent/` — Google Drive find / read / analyze / **confirm-before-write** modify (Docs, Sheets, text). The safety model is the point of this agent: the LLM never rewrites file content.
+
+| File | Purpose |
+|---|---|
+| `__init__.py` | Re-exports `DriveAgent`. |
+| `agent.py` | `_SKILLS` registry + `matches()` (Drive noun **and** action, or LLM `drive_intent`). On dead/missing token sends the (re)connect link as a side effect and returns a silent handled sentinel (CalendarAgent convention). Centralizes the `awaiting_file_choice` stash. |
+| `skill_context.py` | `SkillContext` + `SkillResult`. |
+| `skills/base.py` | `DriveSkill` ABC (no LLM/WhatsApp/formatting; Drive API I/O allowed; **never writes** except apply_modification). |
+| `skills/find_file.py` / `read_file.py` / `analyze_file.py` | Resolve a file by name; 0 → `file_not_found`, >1 → `drive_file_choice`, 1 → list / raw content / content+question. `analyze` carries the question for the Layer-4 LLM. |
+| `skills/propose_modification.py` | Validates the spec, resolves the file + exact change deterministically, stages `pending_drive` (`awaiting_modify_confirmation`). **Writes nothing.** |
+| `skills/apply_modification.py` | Gate-only. Re-checks `headRevisionId`; on drift returns `drive_modify_revision_conflict` (no write). Sole writer. |
+| `_shared/drive_client.py` | Per-user token decrypt + `resolve_file` (exact-name promotion over `contains`). |
+| `_shared/edit_resolver.py` | Pure deterministic spec→change resolution. Refuses on 0/>1 matches. Shared by propose + apply. |
+
+Gate: `app/handlers/pending_drive_handler.py` — two-step (`awaiting_file_choice` / `awaiting_modify_confirmation`). Abort wins; only an explicit affirmative applies; a stale (>10 min) stage expires unapplied.
+
+Service/OAuth: `services/google_drive.py`, `services/google_drive_oauth.py` (ISOLATED — own state namespace; see CLAUDE.md Hard Rule #17), `services/drive_connect.py`. No repository — the Drive API is the store of record.
+
+Router integration: `DriveAgent.matches(parsed)` is a narrow pattern predicate (noun+action). It wins the keyword chain outright with **no disambiguation** (checked after the list block), so the existing disambiguation gate is unchanged.
+
 ---
 
 ## Scaling notes

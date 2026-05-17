@@ -17,7 +17,7 @@ WhatsApp-based AI personal assistant. Users text naturally ("Pague dos millones 
 
 ## Tech Stack
 
-Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API + Microsoft Graph Calendar (per-user OAuth, Fernet-encrypted tokens, up to 2 accounts/user, merged) · Railway (NIXPACKS)
+Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API + Microsoft Graph Calendar (per-user OAuth, Fernet-encrypted tokens, up to 2 accounts/user, merged) · Google Drive API (read/analyze/confirmed-modify Docs+Sheets+text; **isolated** OAuth namespace) · Railway (NIXPACKS)
 
 ---
 
@@ -34,6 +34,7 @@ WhatsApp POST /webhook
   -> handle_pending_event()                  [handlers/pending_event_handler.py]    ← calendar-clarify gate
   -> handle_pending_travel()                 [handlers/pending_travel_handler.py]   ← location + reminder gate
   -> handle_pending_list()                   [handlers/pending_list_handler.py]     ← list choice / delete-confirm / disambig
+  -> handle_pending_drive()                  [handlers/pending_drive_handler.py]    ← Drive file-choice / modify-confirm gate
   -> handle_account_link()                   [handlers/account_link_handler.py]     ← add-2nd-calendar-account flow (provider ask + link)
   -> parse_message()          LAYER 1        [parser/message_parser.py]
   -> route()                  LAYER 2        [router/deterministic_router.py]     ← returns RouteDecision
@@ -151,6 +152,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 | `GreetingAgent` | `greeting_agent.py` | Hardcoded responses, no LLM, no Firestore |
 | `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan for out-of-scope vs true ambiguity; logs to `unknown_messages` |
 | `ListAgent` | `list_agent/` (package) | Save/recall/delete user-defined named lists; 3-list cap, 10-min dedup, stages delete confirm |
+| `DriveAgent` | `drive_agent/` (package) | Google Drive find/read/analyze + **confirm-before-write** modify (Docs/Sheets/text). LLM never rewrites content — parser extracts a structured edit spec, skill resolves it deterministically, write only after explicit user confirmation + revision guard |
 
 **Key behaviors:**
 - `ExpenseAgent`: category validated against `{"food","transport","shopping","health","other"}`. Non-standard hints fall back to "other" + keyword scan.
@@ -187,6 +189,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 - `ListAgent` failure codes → `list_not_found` / `list_cap_reached` / `empty_list` render from `data` (existing_names, requested_name, list_name); `save_failed` / `delete_failed` / `missing_item` use `_SPECIFIC_ERRORS` (no LLM)
 - `ExpenseAgent` `needs_currency=True` → currency-ask prompt (no LLM)
 - `result.success=False` → `_SPECIFIC_ERRORS` first, then `_ERROR_MESSAGES` per agent (no LLM)
+- `DriveAgent` types → all hardcoded ES/EN copy (no LLM): `drive_find`, `drive_read`, `drive_file_choice`, `drive_modify_preview` (the explicit authorization prompt — cell/replace/append variants), `drive_modify_applied`, `drive_modify_revision_conflict`. `drive_connect_link_sent` / `drive_token_invalid_handled` → `""` (agent already DM'd the link; webhook drops empty). `drive_analyze` is the **only** Drive LLM path (answers the user's question over fetched content via `FORMATTING_PROMPT`). Drive failure codes → `_SPECIFIC_ERRORS` (`drive_not_connected`, `file_not_found`, `unsupported_file_type`, `edit_no_match`, `edit_multiple_matches`, `edit_column_not_found`, `invalid_edit_spec`, `edit_unsupported_for_type`, `modify_failed`, …)
 - All other success → GPT-4o-mini with `FORMATTING_PROMPT`; fallback to `_TYPE_FALLBACKS` then `_FALLBACKS`
 
 **Language:** `user["language"]` from Firestore. Prompt + user_content both enforce it.
@@ -228,6 +231,11 @@ Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). 
 - Routes: `/auth/{google,microsoft}/{authorize,callback}`. The callback writes the `connected_accounts` slot from `oauth_pending_slot` via `UserRepository.save_connected_account`; primary connect also sets `completed` + reminders. **All calendar consumers go through `services/calendar_accounts.py`** (merged reads, primary-only create, per-account error isolation) — never `google_calendar`/`microsoft_calendar` directly.
 - **Add a 2nd account:** `handlers/account_link_handler.py` gate — natural-language add-account phrase → ask provider → mint `slot="secondary"` token → send link. Cap = 2.
 
+**Google Drive OAuth — fully isolated** (`services/google_drive_oauth.py`, `services/drive_connect.py`, `api/oauth_routes.py`):
+- Deliberately NOT shared with calendar OAuth. Drive uses its own state-token namespace (`google_drive_oauth_state_token` / `_expires_at` / `_code_verifier`) and its own credential fields (`google_drive_refresh_token` Fernet, `google_drive_connected`). Rationale: the calendar callback writes a `connected_accounts` slot, so a shared state field could let a Drive consent be resolved by the calendar callback. Drive routes/repo methods never touch any calendar/onboarding/connected_accounts field.
+- Scope: full `https://www.googleapis.com/auth/drive` (`include_granted_scopes=false`). Beta-OK; **production needs Google sensitive-scope verification** (not blocking, tracked).
+- Routes: `/auth/google-drive/{authorize,callback}` + `/auth/drive-done`. `drive_connect.send_connect_link` (first connect) / `handle_drive_token_invalid` (dead token → clear + reconnect link), mirroring `calendar_reconnect` but on the Drive namespace. DriveAgent triggers these as a side effect (CalendarAgent convention) and returns a silent handled sentinel.
+
 **Pending expense gate** (`handlers/pending_expense_handler.py`): stashes amount/category in `user_context_store` when `needs_currency=True`. Next message intercepted for currency word → finalize + lock `preferred_currency`.
 
 **Pending event gate** (`handlers/pending_event_handler.py`): stashes pending event on `calendar_clarify_create`. Classifies next reply: `affirm`→create, `query`→show today, `abort`→drop, `other`→drop + pipeline. Priority: `abort > query > affirm`.
@@ -244,7 +252,7 @@ Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). 
 - Per recipient, picks `body_es` or `body_en` from `user["language"]`. Skips users not in onboarding `completed` state. Uses `send_whatsapp_message_with_status` so the response counts true HTTP-200s vs failures.
 - Response: `{sent, failed, skipped_not_onboarded, skipped_unknown, errors[]}`.
 - **Beta caveat:** free-form text only works because Meta-provided test numbers don't enforce the 24-hour customer-service window. Production WABA migration must move broadcasts to approved message templates.
-- **Pending-state caveat:** a broadcast arriving while a user is in a pending gate (`pending_expense`, `pending_event`, `pending_travel`, `pending_list`, `pending_type_clarify`) can be interpreted by the gate as the next user reply. Pending state is in-memory and short-lived — at worst the user re-sends. Prefer broadcasting at low-traffic times.
+- **Pending-state caveat:** a broadcast arriving while a user is in a pending gate (`pending_expense`, `pending_event`, `pending_travel`, `pending_list`, `pending_drive`, `pending_type_clarify`) can be interpreted by the gate as the next user reply. Pending state is in-memory and short-lived — at worst the user re-sends. Prefer broadcasting at low-traffic times.
 
 ---
 
@@ -261,6 +269,8 @@ has_connected_calendar,       # bool — True iff >=1 account connected (provide
 google_oauth_state_token, google_oauth_state_expires_at, google_oauth_code_verifier,
 microsoft_oauth_flow,         # JSON MSAL auth-code-flow blob (PKCE+state), the Microsoft analogue of google_oauth_code_verifier
 oauth_pending_provider, oauth_pending_slot,   # "google"|"microsoft" / "primary"|"secondary" — what the live state token's callback writes
+google_drive_refresh_token (Fernet), google_drive_connected,   # Drive — ISOLATED from calendar, never in connected_accounts
+google_drive_oauth_state_token, google_drive_oauth_state_expires_at, google_drive_oauth_code_verifier,   # Drive OAuth — separate namespace, never the shared google_oauth_state_token
 oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
 calendar_reminders_enabled,   # True by default on connect; explicit False = opted out
 notified_event_ids,           # list[str] "{eventId}:{YYYY-MM-DD}" — capped at 100
@@ -313,7 +323,7 @@ updated_at: ISO str
 app/
 ├── api/
 │   ├── whatsapp_webhook.py          # Thin dispatcher: verify, normalize, gates, 4-layer pipeline
-│   ├── oauth_routes.py              # /auth/{google,microsoft}/authorize|callback + /auth/done
+│   ├── oauth_routes.py              # /auth/{google,microsoft}/authorize|callback + /auth/done + /auth/google-drive/* (isolated)
 │   ├── cron_routes.py               # /cron/oauth-followups (X-Cron-Secret protected)
 │   └── admin_routes.py              # /admin/broadcasts (X-Cron-Secret protected)
 ├── parser/
@@ -329,6 +339,7 @@ app/
 │   ├── calendar_agent.py
 │   ├── travel_agent/            # Agent/Skill package — reference implementation (see OTTO_AGENTS.md)
 │   ├── list_agent/              # Agent/Skill package — save/recall/delete named lists
+│   ├── drive_agent/             # Agent/Skill package — Drive find/read/analyze/confirmed-modify
 │   ├── summary_agent.py
 │   ├── weather_agent.py
 │   ├── greeting_agent.py
@@ -342,6 +353,7 @@ app/
 │   ├── pending_event_handler.py
 │   ├── pending_travel_handler.py    # location + departure-reminder gate
 │   ├── pending_list_handler.py      # list choice / delete-confirm / disambiguation gate
+│   ├── pending_drive_handler.py     # Drive file-choice / modify-confirmation gate
 │   └── account_link_handler.py      # add-2nd-calendar-account gate (provider ask + link)
 ├── repositories/
 │   ├── expense_repository.py
@@ -349,6 +361,7 @@ app/
 │   ├── unknown_message_repository.py
 │   ├── scheduled_reminder_repository.py
 │   └── list_repository.py           # `lists` collection
+│   # DriveAgent uses no repository — Drive API is its store of record
 ├── db/
 │   ├── firestore_context_store.py   # Firestore-backed, NOT used by agents
 │   └── user_context_store.py        # In-memory ephemeral context
@@ -362,6 +375,9 @@ app/
 │   ├── google_calendar.py           # Google: get_today_events_for_user, create_event_for_user, get_upcoming_events_window, normalize_events
 │   ├── microsoft_calendar.py        # Microsoft Graph sibling — returns Google-shaped event dicts
 │   ├── calendar_accounts.py         # provider-agnostic merged accessor — ALL calendar consumers use this
+│   ├── google_drive.py              # Drive API: search/read/export + Sheets/Docs read & write helpers
+│   ├── google_drive_oauth.py        # Drive OAuth — ISOLATED copy of google_oauth (own state namespace)
+│   ├── drive_connect.py             # Drive connect/reconnect link sender (Drive namespace)
 │   ├── google_oauth.py              # build_authorize_url(), exchange_code()
 │   ├── microsoft_oauth.py           # MSAL build_authorize_url(), exchange_code()
 │   ├── provider_detect.py           # accent-insensitive Gmail/Outlook detection
@@ -405,6 +421,7 @@ OPENWEATHER_API_KEY
 GOOGLE_OAUTH_CLIENT_ID
 GOOGLE_OAUTH_CLIENT_SECRET
 GOOGLE_OAUTH_REDIRECT_URI           # https://<domain>/auth/google/callback
+GOOGLE_DRIVE_OAUTH_REDIRECT_URI     # https://<domain>/auth/google-drive/callback (reuses GOOGLE_OAUTH_CLIENT_ID/SECRET; register this URI in Google Cloud console)
 MICROSOFT_OAUTH_CLIENT_ID           # Azure AD app (Entra) registration
 MICROSOFT_OAUTH_CLIENT_SECRET
 MICROSOFT_OAUTH_REDIRECT_URI        # https://<domain>/auth/microsoft/callback
@@ -436,6 +453,8 @@ ENVIRONMENT=development|production
 13. **Never ask the user for currency during onboarding.** Deferred to first expense. `ExpenseAgent` returns `needs_currency=True` if no explicit currency. Hard Rule #6 applies thereafter.
 14. **CalendarAgent and TravelAgent must always use the per-user refresh token.** Never `get_today_events()`. Decrypt with `token_crypto.decrypt()`. Return `error_message="calendar_not_connected"` if token missing.
 15. **OAuth PKCE verifier must be stored and retrieved.** `build_authorize_url()` returns `(url, code_verifier)`. Store in Firestore at `/authorize`, pass to `exchange_code(code_verifier=...)` at `/callback`. Omitting causes `(invalid_grant) Missing code verifier`.
+16. **Drive writes only after explicit user confirmation.** The LLM never rewrites file content — Layer 1 extracts a structured `drive_edit` spec; `edit_resolver` resolves it deterministically and REFUSES (no_match / multiple_matches) instead of guessing; `propose_modification` only stages a preview; `apply_modification` is the sole writer, gate-only, and re-checks `headRevisionId` before writing (revision drift → abort, no write). Never add a Drive write path that bypasses this.
+17. **Drive OAuth stays isolated.** Never route Drive consent through the shared `google_oauth_state_token` / `connected_accounts` / calendar callback. Drive has its own `google_drive_oauth_*` namespace and `google_drive_refresh_token`. Mixing them lets a Drive consent mutate a calendar account.
 
 ---
 

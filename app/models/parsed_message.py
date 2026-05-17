@@ -1,4 +1,4 @@
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -23,3 +23,6 @@ class ParsedMessage(BaseModel):
     list_name: Optional[str] = Field(None, description="List name exactly as the user typed it — not normalized or translated.")
     list_item: Optional[str] = Field(None, description="Content to save (URL or plain text), exactly as the user sent it.")
     list_label: Optional[str] = Field(None, description="Optional short label the user attached to this specific item.")
+    drive_intent: Optional[Literal["find", "read", "analyze", "modify"]] = Field(None, description="User's Google Drive operation intent, or None.")
+    drive_file_ref: Optional[str] = Field(None, description="Drive file name exactly as the user referred to it — not normalized or translated.")
+    drive_edit: Optional[Dict[str, Any]] = Field(None, description="Structured, deterministic edit spec for a modify intent. Validated by the agent before anything is staged; never applied without explicit user confirmation.")

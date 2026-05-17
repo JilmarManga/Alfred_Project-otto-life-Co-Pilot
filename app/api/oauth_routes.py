@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.repositories.user_repository import UserRepository
-from app.services import google_oauth, microsoft_oauth
+from app.services import google_oauth, microsoft_oauth, google_drive_oauth
 from app.services import google_calendar, microsoft_calendar
 from app.services.token_crypto import encrypt, TokenCryptoError
 from app.services.whatsapp_sender import send_whatsapp_message
@@ -277,3 +277,113 @@ async def microsoft_callback(request: Request):
 @router.get("/auth/done")
 async def done():
     return HTMLResponse(_DONE_PAGE)
+
+
+# --------------------------------------------------------------------------- #
+# Google Drive OAuth — fully isolated from the calendar flow above.            #
+# Uses the google_drive_oauth_* state namespace and writes ONLY the Drive      #
+# refresh token. It never calls _finalize_connection / save_connected_account  #
+# so a Drive consent can never mutate a calendar account.                      #
+# --------------------------------------------------------------------------- #
+
+_DRIVE_DONE_PAGE = f"""
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Drive connected — Otto</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+{_PAGE_STYLE}
+</head><body>
+<div class="card accent-green">
+  <img src="/static/logo.png" alt="Otto" class="logo">
+  <div class="brand">Otto</div>
+  <div class="icon">✅</div>
+  <h1>Drive connected!</h1>
+  <p class="sub">Otto can now read and (only with your explicit confirmation) edit your files. Head back to WhatsApp and ask away.</p>
+  <a class="cta" href="https://wa.me/" target="_blank">Back to WhatsApp</a>
+</div>
+</body></html>
+"""
+
+
+def _drive_connected_copy(language: str) -> str:
+    return (
+        "Drive connected ✅\n\nYou can ask me to find, read or analyze a file. "
+        "I'll always show you the change and wait for your *yes* before editing anything."
+        if language == "en"
+        else "Drive conectado ✅\n\nPídeme buscar, leer o analizar un archivo. "
+        "Siempre te muestro el cambio y espero tu *sí* antes de editar algo."
+    )
+
+
+@router.get("/auth/google-drive/authorize")
+async def drive_authorize(state: str = ""):
+    """Redirect the user to Google's Drive consent screen."""
+    if not state:
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    user = UserRepository.get_user_by_drive_oauth_state(state)
+    if not user:
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    try:
+        url, code_verifier = google_drive_oauth.build_authorize_url(state_token=state)
+    except Exception as exc:
+        logger.exception("Failed to build Drive authorize URL: %s", exc)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    if code_verifier:
+        UserRepository.set_drive_oauth_state_token(
+            user["phone"], state,
+            user.get("google_drive_oauth_state_expires_at"),
+            code_verifier=code_verifier,
+        )
+
+    return RedirectResponse(url)
+
+
+@router.get("/auth/google-drive/callback")
+async def drive_callback(request: Request):
+    """Google redirects here after Drive consent. Exchange code → refresh
+    token, encrypt, save into the Drive-only fields, confirm via WhatsApp."""
+    params = dict(request.query_params)
+    code = params.get("code")
+    state = params.get("state")
+    error = params.get("error")
+
+    if error or not code or not state:
+        logger.warning("Drive OAuth callback missing code/state or has error: %s", params)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    user = UserRepository.get_user_by_drive_oauth_state(state)
+    if not user:
+        logger.warning("Drive OAuth callback: no user for state token (expired or unknown)")
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    phone = user["phone"]
+    language = (user.get("language") or "en").lower()
+
+    try:
+        code_verifier = user.get("google_drive_oauth_code_verifier")
+        refresh_token = google_drive_oauth.exchange_code(
+            code=code, state_token=state, code_verifier=code_verifier,
+        )
+    except Exception as exc:
+        logger.exception("Drive OAuth code exchange failed for %s: %s", phone, exc)
+        send_whatsapp_message(phone, _exchange_failed_copy(language))
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    try:
+        encrypted = encrypt(refresh_token)
+    except TokenCryptoError as exc:
+        logger.exception("Drive token encryption failed for %s: %s", phone, exc)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    UserRepository.save_drive_credentials(phone, encrypted)
+    UserRepository.clear_drive_oauth_state(phone)
+    send_whatsapp_message(phone, _drive_connected_copy(language))
+
+    return RedirectResponse(url="/auth/drive-done")
+
+
+@router.get("/auth/drive-done")
+async def drive_done():
+    return HTMLResponse(_DRIVE_DONE_PAGE)
