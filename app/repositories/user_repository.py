@@ -61,14 +61,31 @@ class UserRepository:
     def set_oauth_state_token(
         user_phone_number: str, state_token: str, expires_at: datetime,
         code_verifier: str = None,
+        *,
+        provider: str = "google",
+        slot: str = "primary",
     ) -> None:
-        """Store an opaque single-use OAuth state token with expiry and PKCE verifier."""
+        """Store an opaque single-use OAuth state token with expiry and PKCE
+        material. The state field name stays `google_oauth_*` for both
+        providers (it is the indexed lookup key — opaque, provider-neutral).
+        `provider` ('google'|'microsoft') and `slot` ('primary'|'secondary')
+        tell the callback which connected_accounts slot to write.
+
+        For Google `code_verifier` is the PKCE verifier string; for Microsoft
+        it is the JSON auth-code-flow blob — stored per-provider so the two
+        flows never collide.
+        """
         data = {
             "google_oauth_state_token": state_token,
             "google_oauth_state_expires_at": expires_at,
+            "oauth_pending_provider": provider,
+            "oauth_pending_slot": slot,
         }
         if code_verifier:
-            data["google_oauth_code_verifier"] = code_verifier
+            if provider == "microsoft":
+                data["microsoft_oauth_flow"] = code_verifier
+            else:
+                data["google_oauth_code_verifier"] = code_verifier
         UserRepository.create_or_update_user(user_phone_number, data)
 
     @staticmethod
@@ -100,8 +117,133 @@ class UserRepository:
             {
                 "google_oauth_state_token": None,
                 "google_oauth_state_expires_at": None,
+                "oauth_pending_provider": None,
+                "oauth_pending_slot": None,
+                "microsoft_oauth_flow": None,
             },
         )
+
+    # --- Multi-provider connected accounts (max 2, any provider mix) ---
+
+    MAX_CONNECTED_ACCOUNTS = 2
+
+    @staticmethod
+    def _seed_legacy_account(data: Dict, now: datetime) -> List[Dict]:
+        """Legacy-compat (no migration): a pre-existing Google-only user has
+        flat `google_calendar_refresh_token` but no `connected_accounts`.
+        Treat that token as the existing primary so adding a second account
+        never drops it."""
+        accounts = list(data.get("connected_accounts") or [])
+        if not accounts and data.get("google_calendar_refresh_token"):
+            accounts.append({
+                "provider": "google",
+                "email": None,
+                "refresh_token": data["google_calendar_refresh_token"],
+                "is_primary": True,
+                "reminders_enabled": data.get("calendar_reminders_enabled") is not False,
+                "created_at": data.get("created_at") or now,
+                "updated_at": now,
+            })
+        return accounts
+
+    @staticmethod
+    def save_connected_account(
+        user_phone_number: str,
+        *,
+        provider: str,
+        encrypted_refresh_token: str,
+        slot: str = "primary",
+        email: Optional[str] = None,
+    ) -> None:
+        """Write/replace a connected calendar account in the given slot.
+
+        Slot 'primary' = index 0, 'secondary' = index 1. Re-linking an
+        existing slot replaces it. Cap is MAX_CONNECTED_ACCOUNTS. When the
+        primary is Google, the legacy `google_calendar_*` fields are kept in
+        sync so untouched Google-only consumers keep working during the
+        transition. `has_connected_calendar` is the new indexed query field.
+        """
+        now = datetime.utcnow()
+        doc_ref = db.collection(UserRepository.COLLECTION_NAME).document(user_phone_number)
+        snapshot = doc_ref.get()
+        data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+        accounts = UserRepository._seed_legacy_account(data, now)
+
+        entry = {
+            "provider": provider,
+            "email": email,
+            "refresh_token": encrypted_refresh_token,
+            "is_primary": slot == "primary",
+            "reminders_enabled": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        if slot == "primary":
+            if accounts:
+                entry["created_at"] = accounts[0].get("created_at") or now
+                accounts[0] = entry
+            else:
+                accounts.append(entry)
+        else:  # secondary
+            if not accounts:
+                # No primary yet — promote this to primary defensively.
+                entry["is_primary"] = True
+                accounts.append(entry)
+            elif len(accounts) >= 2:
+                entry["created_at"] = accounts[1].get("created_at") or now
+                accounts[1] = entry
+            else:
+                accounts.append(entry)
+
+        accounts = accounts[: UserRepository.MAX_CONNECTED_ACCOUNTS]
+
+        update: Dict = {
+            "connected_accounts": accounts,
+            "has_connected_calendar": True,
+        }
+        primary = accounts[0]
+        if primary.get("provider") == "google":
+            update["google_calendar_refresh_token"] = primary["refresh_token"]
+            update["google_calendar_connected"] = True
+        UserRepository.create_or_update_user(user_phone_number, update)
+
+    @staticmethod
+    def count_connected_accounts(user: Dict) -> int:
+        """Number of connected accounts, honoring the legacy-compat shim."""
+        accounts = user.get("connected_accounts")
+        if accounts:
+            return len(accounts)
+        return 1 if user.get("google_calendar_refresh_token") else 0
+
+    @staticmethod
+    def clear_connected_account(user_phone_number: str, provider: str) -> None:
+        """Remove the first connected account matching `provider` (used by the
+        reconnect flow when a token is rejected). Recomputes the legacy
+        mirror + `has_connected_calendar`."""
+        now = datetime.utcnow()
+        doc_ref = db.collection(UserRepository.COLLECTION_NAME).document(user_phone_number)
+        snapshot = doc_ref.get()
+        data = (snapshot.to_dict() or {}) if snapshot.exists else {}
+        accounts = UserRepository._seed_legacy_account(data, now)
+
+        remaining = [a for a in accounts if a.get("provider") != provider]
+        if remaining:
+            remaining[0]["is_primary"] = True
+            for a in remaining[1:]:
+                a["is_primary"] = False
+
+        update: Dict = {
+            "connected_accounts": remaining,
+            "has_connected_calendar": bool(remaining),
+        }
+        if not remaining or remaining[0].get("provider") != "google":
+            update["google_calendar_refresh_token"] = None
+            update["google_calendar_connected"] = False
+        else:
+            update["google_calendar_refresh_token"] = remaining[0]["refresh_token"]
+            update["google_calendar_connected"] = True
+        UserRepository.create_or_update_user(user_phone_number, update)
 
     @staticmethod
     def save_calendar_credentials(
@@ -224,22 +366,32 @@ class UserRepository:
         )
 
     @staticmethod
+    def _has_any_calendar(data: Dict) -> bool:
+        """True if the user has at least one connected calendar account,
+        across providers. Honors the legacy Google-only shim so pre-existing
+        users keep working with zero migration."""
+        if data.get("connected_accounts"):
+            return True
+        return bool(data.get("google_calendar_refresh_token"))
+
+    @staticmethod
     def list_users_for_reminders() -> List[Dict]:
         """
-        Users who have connected Google Calendar and haven't opted out of
-        1-hour reminders. `calendar_reminders_enabled` is treated as True
-        by default — only an explicit False disables reminders.
+        Users with at least one connected calendar (Google or Microsoft) who
+        haven't opted out of 1-hour reminders. `calendar_reminders_enabled` is
+        treated as True by default — only an explicit False disables them.
+
+        Streams the collection and filters in Python (same pattern as
+        `list_pending_oauth_followups`): provider-agnostic membership can't be
+        expressed as a single indexed Firestore filter, and beta volume is low.
         """
-        query = (
-            db.collection(UserRepository.COLLECTION_NAME)
-            .where(filter=FieldFilter("google_calendar_connected", "==", True))
-        )
+        query = db.collection(UserRepository.COLLECTION_NAME)
         results: List[Dict] = []
         for doc in query.stream():
             data = doc.to_dict() or {}
             if data.get("calendar_reminders_enabled") is False:
                 continue
-            if not data.get("google_calendar_refresh_token"):
+            if not UserRepository._has_any_calendar(data):
                 continue
             data["phone"] = doc.id
             results.append(data)
@@ -275,20 +427,17 @@ class UserRepository:
     @staticmethod
     def list_users_for_morning_brief() -> List[Dict]:
         """
-        Users who have connected Google Calendar and haven't opted out of
-        reminders. Explicit `calendar_reminders_enabled=False` disables both
-        1-hour reminders and the morning brief.
+        Users with at least one connected calendar (Google or Microsoft) who
+        haven't opted out of reminders. Explicit `calendar_reminders_enabled
+        =False` disables both 1-hour reminders and the morning brief.
         """
-        query = (
-            db.collection(UserRepository.COLLECTION_NAME)
-            .where(filter=FieldFilter("google_calendar_connected", "==", True))
-        )
+        query = db.collection(UserRepository.COLLECTION_NAME)
         results: List[Dict] = []
         for doc in query.stream():
             data = doc.to_dict() or {}
             if data.get("calendar_reminders_enabled") is False:
                 continue
-            if not data.get("google_calendar_refresh_token"):
+            if not UserRepository._has_any_calendar(data):
                 continue
             data["phone"] = doc.id
             results.append(data)

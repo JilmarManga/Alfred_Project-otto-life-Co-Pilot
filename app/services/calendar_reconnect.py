@@ -25,29 +25,39 @@ from app.services.whatsapp_sender import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_NAME = {"google": "Google Calendar", "microsoft": "Outlook Calendar"}
+
 _RECONNECT_COPY = {
-    "es": "Tu conexión con Google Calendar caducó 😕. Vuelve a conectarla aquí 👉 {link}",
-    "en": "Your Google Calendar connection expired 😕. Reconnect here 👉 {link}",
+    "es": "Tu conexión con {provider_name} caducó 😕. Vuelve a conectarla aquí 👉 {link}",
+    "en": "Your {provider_name} connection expired 😕. Reconnect here 👉 {link}",
 }
 
 
-def _build_authorize_url(state_token: str) -> str:
+def _build_authorize_url(state_token: str, provider: str = "google") -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    return f"{base}/auth/google/authorize?state={state_token}"
+    return f"{base}/auth/{provider}/authorize?state={state_token}"
 
 
-def handle_token_invalid(phone: str, lang: str = "es") -> None:
-    """Clear the dead token and send a fresh OAuth link. Best-effort: any
-    exception is swallowed so callers can still send their own follow-up
-    message without a cascading failure."""
+def handle_token_invalid(phone: str, lang: str = "es", provider: str = "google") -> None:
+    """Clear the dead account for `provider` and send a fresh, provider-correct
+    OAuth link. Best-effort: any exception is swallowed so callers can still
+    send their own follow-up message without a cascading failure."""
     try:
-        UserRepository.clear_calendar_credentials(phone)
+        UserRepository.clear_connected_account(phone, provider)
         state_token = secrets.token_urlsafe(32)
         expires_at = datetime.utcnow() + timedelta(hours=1)
-        UserRepository.set_oauth_state_token(phone, state_token, expires_at)
+        UserRepository.set_oauth_state_token(
+            phone, state_token, expires_at, provider=provider, slot="primary"
+        )
         UserRepository.set_onboarding_state(phone, "oauth_pending")
-        link = _build_authorize_url(state_token)
+        link = _build_authorize_url(state_token, provider)
         copy = _RECONNECT_COPY.get((lang or "es").lower(), _RECONNECT_COPY["es"])
-        send_whatsapp_message(phone, copy.format(link=link))
+        send_whatsapp_message(
+            phone,
+            copy.format(
+                link=link,
+                provider_name=_PROVIDER_NAME.get(provider, "Google Calendar"),
+            ),
+        )
     except Exception as exc:
         logger.exception("Reconnect dispatch failed for %s: %s", phone, exc)

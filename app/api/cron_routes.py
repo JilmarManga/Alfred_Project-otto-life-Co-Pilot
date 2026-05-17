@@ -8,10 +8,9 @@ from fastapi import APIRouter, Header, HTTPException, status
 
 from app.handlers import onboarding_copy
 from app.repositories.user_repository import UserRepository
-from app.services.google_calendar import get_upcoming_events_window
+from app.services.calendar_accounts import get_upcoming_events_window_merged
 from app.services.location_resolver import resolve_location, STATUS_RESOLVED
 from app.services.morning_briefing import run_morning_briefing
-from app.services.token_crypto import decrypt
 from app.services.whatsapp_sender import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -28,9 +27,9 @@ def _require_secret(x_cron_secret: str) -> None:
         )
 
 
-def _build_authorize_url(state_token: str) -> str:
+def _build_authorize_url(state_token: str, provider: str = "google") -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    return f"{base}/auth/google/authorize?state={state_token}"
+    return f"{base}/auth/{provider}/authorize?state={state_token}"
 
 
 # --- 1-hour reminder helpers ---
@@ -71,18 +70,17 @@ def _run_event_reminders() -> int:
     sent = 0
     for user in UserRepository.list_users_for_reminders():
         phone = user.get("phone")
-        encrypted = user.get("google_calendar_refresh_token")
-        if not phone or not encrypted:
+        if not phone:
             continue
 
         try:
-            refresh_token = decrypt(encrypted)
-        except Exception as exc:
-            logger.exception("Reminder: decrypt token failed for %s: %s", phone, exc)
-            continue
-
-        try:
-            events = get_upcoming_events_window(refresh_token, 55, 75) or []
+            # Merged across providers; non-strict so one dead token never
+            # aborts the batch (per-account errors are logged + skipped).
+            events = get_upcoming_events_window_merged(
+                user, 55, 75, strict_primary=False
+            ) or []
+        except ValueError:
+            continue  # calendar_not_connected
         except Exception as exc:
             logger.exception("Reminder: calendar fetch failed for %s: %s", phone, exc)
             continue
@@ -139,8 +137,7 @@ def _run_morning_briefs() -> int:
     sent = 0
     for user in UserRepository.list_users_for_morning_brief():
         phone = user.get("phone")
-        encrypted = user.get("google_calendar_refresh_token")
-        if not phone or not encrypted:
+        if not phone:
             continue
 
         tz = _resolve_tz(user.get("timezone"))
@@ -152,13 +149,7 @@ def _run_morning_briefs() -> int:
             continue
 
         try:
-            refresh_token = decrypt(encrypted)
-        except Exception as exc:
-            logger.exception("Morning brief: decrypt token failed for %s: %s", phone, exc)
-            continue
-
-        try:
-            user["_refresh_token"] = refresh_token
+            # Composer pulls events merged across providers from the user dict.
             delivered = run_morning_briefing(user)
             if delivered:
                 UserRepository.mark_morning_brief_sent(phone, local_today)
@@ -236,11 +227,14 @@ def run_cron_job() -> dict:
         if not phone:
             continue
         try:
+            provider = user.get("oauth_pending_provider") or "google"
             fresh_token = secrets.token_urlsafe(32)
             UserRepository.set_oauth_state_token(
-                phone, fresh_token, datetime.utcnow() + timedelta(hours=1)
+                phone, fresh_token, datetime.utcnow() + timedelta(hours=1),
+                provider=provider,
+                slot=user.get("oauth_pending_slot") or "primary",
             )
-            link = _build_authorize_url(fresh_token)
+            link = _build_authorize_url(fresh_token, provider)
             lang = (user.get("language") or "en").lower()
             name = user.get("name") or ""
             msg = onboarding_copy.get("oauth_followup", lang, name=name, link=link)

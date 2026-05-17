@@ -10,13 +10,15 @@ from app.responder.response_formatter import format_response
 from app.services.calendar_reconnect import handle_token_invalid
 from app.services.google_calendar import (
     CalendarTokenInvalid,
-    create_event_for_user,
     format_events_detailed,
-    get_today_events_for_user,
     normalize_events,
     summarize_day,
 )
-from app.services.token_crypto import decrypt
+from app.services.calendar_accounts import (
+    iter_calendar_accounts,
+    get_today_events_merged,
+    create_event_on_primary,
+)
 from app.services.whatsapp_sender import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -167,17 +169,8 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
         send_whatsapp_message(phone, _ABORT_ACK.get(lang, _ABORT_ACK["es"]))
         return True
 
-    # affirm and query both need the refresh token
-    encrypted = user.get("google_calendar_refresh_token")
-    if not encrypted:
-        update_user_context(phone, "pending_event", None)
-        send_whatsapp_message(phone, _NOT_CONNECTED.get(lang, _NOT_CONNECTED["es"]))
-        return True
-
-    try:
-        refresh_token = decrypt(encrypted)
-    except Exception as exc:
-        logger.exception("Decrypt calendar token failed for %s: %s", phone, exc)
+    # affirm and query both need at least one connected calendar account
+    if not iter_calendar_accounts(user):
         update_user_context(phone, "pending_event", None)
         send_whatsapp_message(phone, _NOT_CONNECTED.get(lang, _NOT_CONNECTED["es"]))
         return True
@@ -191,8 +184,8 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
             end_dt = start_dt + timedelta(minutes=duration)
             tz_str = user.get("timezone") or "UTC"
 
-            event = create_event_for_user(
-                refresh_token,
+            event = create_event_on_primary(
+                user,
                 title=pending["title"],
                 start_iso=start_dt.isoformat(),
                 end_iso=end_dt.isoformat(),
@@ -202,7 +195,7 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
         except CalendarTokenInvalid as exc:
             logger.warning("Calendar token invalid for %s on create: %s", phone, exc)
             update_user_context(phone, "pending_event", None)
-            handle_token_invalid(phone, lang)
+            handle_token_invalid(phone, lang, getattr(exc, "provider", "google"))
             return True
         except Exception as exc:
             logger.exception("Pending event creation failed for %s: %s", phone, exc)
@@ -229,7 +222,7 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
 
     # intent == "query"
     try:
-        events_raw = get_today_events_for_user(refresh_token) or []
+        events_raw = get_today_events_merged(user) or []
         events = normalize_events(events_raw) if events_raw else []
         update_user_context(phone, "today_events", events)
         update_user_context(phone, "last_intent", "calendar_query")
@@ -250,7 +243,7 @@ def handle_pending_event(inbound: InboundMessage, user: Optional[dict]) -> bool:
     except CalendarTokenInvalid as exc:
         logger.warning("Calendar token invalid for %s on query: %s", phone, exc)
         update_user_context(phone, "pending_event", None)
-        handle_token_invalid(phone, lang)
+        handle_token_invalid(phone, lang, getattr(exc, "provider", "google"))
         return True
     except Exception as exc:
         logger.exception("Pending event query failed for %s: %s", phone, exc)

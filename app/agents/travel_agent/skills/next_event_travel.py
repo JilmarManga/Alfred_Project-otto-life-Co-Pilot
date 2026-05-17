@@ -6,7 +6,8 @@ from app.agents.travel_agent.skills.base import TravelSkill
 from app.agents.travel_agent._shared.event_selection import find_next_upcoming_event
 from app.agents.travel_agent._shared.leave_time import compute_leave_decision
 from app.db.user_context_store import get_user_context, update_user_context
-from app.services.google_calendar import get_today_events_for_user, normalize_events
+from app.services.google_calendar import normalize_events
+from app.services.calendar_accounts import get_today_events_merged
 from app.services.maps.maps_service import estimate_travel_info
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,8 @@ class NextEventTravelSkill(TravelSkill):
             events = context.get("today_events", [])
 
             if not events:
-                refresh_token = ctx.payload.get("refresh_token", "")
                 try:
-                    events_raw = get_today_events_for_user(refresh_token)
+                    events_raw = get_today_events_merged(ctx.user)
                     events = normalize_events(events_raw) if events_raw else []
                     update_user_context(phone, "today_events", events)
                 except Exception as exc:

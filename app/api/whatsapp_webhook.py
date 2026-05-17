@@ -13,6 +13,7 @@ from app.handlers.onboarding_handler import handle_onboarding
 from app.handlers.pending_expense_handler import handle_pending_expense
 from app.handlers.pending_type_clarify_handler import handle_pending_type_clarify
 from app.handlers.pending_event_handler import handle_pending_event
+from app.handlers.account_link_handler import handle_account_link
 from app.handlers.pending_list_handler import handle_pending_list
 from app.handlers.pending_travel_handler import handle_pending_travel
 from app.db.user_context_store import update_user_context
@@ -93,6 +94,9 @@ async def receive_webhook(request: Request) -> dict:
 
     if handle_pending_list(inbound, user):
         return {"status": "pending_list"}
+
+    if handle_account_link(inbound, user):
+        return {"status": "account_link"}
 
     # Enrich user dict with phone (Firestore doc.to_dict() doesn't include the doc ID)
     user["phone_number"] = phone

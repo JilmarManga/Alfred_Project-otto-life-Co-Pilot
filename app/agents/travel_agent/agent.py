@@ -7,7 +7,7 @@ from app.agents.travel_agent.skills.resolve_event_location import ResolveEventLo
 from app.agents.travel_agent.skills.schedule_departure_reminder import ScheduleDepartureReminderSkill
 from app.models.agent_result import AgentResult
 from app.models.parsed_message import ParsedMessage
-from app.services.token_crypto import decrypt
+from app.services.calendar_accounts import iter_calendar_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -44,17 +44,7 @@ class TravelAgent(BaseAgent):
         and executes it via the shared _run path."""
         phone = user.get("phone_number", "")
 
-        encrypted = user.get("google_calendar_refresh_token")
-        if not encrypted:
-            return AgentResult(
-                agent_name=self.agent_name,
-                success=False,
-                error_message="calendar_not_connected",
-            )
-        try:
-            refresh_token = decrypt(encrypted)
-        except Exception as exc:
-            logger.exception("TravelAgent: token decrypt failed for %s: %s", phone, exc)
+        if not iter_calendar_accounts(user):
             return AgentResult(
                 agent_name=self.agent_name,
                 success=False,
@@ -66,7 +56,7 @@ class TravelAgent(BaseAgent):
             user=user,
             parsed=parsed,
             inbound_text=parsed.raw_message,
-            payload={"refresh_token": refresh_token},
+            payload={},
         )
         return self._run(skill_name, ctx)
 

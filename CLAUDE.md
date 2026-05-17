@@ -17,7 +17,7 @@ WhatsApp-based AI personal assistant. Users text naturally ("Pague dos millones 
 
 ## Tech Stack
 
-Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API (per-user OAuth, Fernet-encrypted tokens) · Railway (NIXPACKS)
+Python 3.13 · FastAPI · Uvicorn · Firestore · WhatsApp Cloud API · OpenAI GPT-4o-mini · OpenWeatherMap · Google Maps Directions API · Google Calendar API + Microsoft Graph Calendar (per-user OAuth, Fernet-encrypted tokens, up to 2 accounts/user, merged) · Railway (NIXPACKS)
 
 ---
 
@@ -34,6 +34,7 @@ WhatsApp POST /webhook
   -> handle_pending_event()                  [handlers/pending_event_handler.py]    ← calendar-clarify gate
   -> handle_pending_travel()                 [handlers/pending_travel_handler.py]   ← location + reminder gate
   -> handle_pending_list()                   [handlers/pending_list_handler.py]     ← list choice / delete-confirm / disambig
+  -> handle_account_link()                   [handlers/account_link_handler.py]     ← add-2nd-calendar-account flow (provider ask + link)
   -> parse_message()          LAYER 1        [parser/message_parser.py]
   -> route()                  LAYER 2        [router/deterministic_router.py]     ← returns RouteDecision
   -> agent.execute()          LAYER 3        [agents/*.py]
@@ -207,21 +208,25 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 
 Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). All strings in `onboarding_copy.py` (no LLM).
 
-**5-state machine** (`users/{phone}.onboarding_state`):
+**6-state machine** (`users/{phone}.onboarding_state`):
 1. `language_pending` — new user → create doc → bilingual 🇬🇧/🇨🇴 prompt. Spanish wins on tie. Defaults to `en` after retry.
 2. `profile_pending` — ask name + city. `name_city_extractor.py` (LLM + regex). Loops on partial answers.
 3. `location_retry` — when `location_resolver` returns `not_found`/`ambiguous`. Reruns on next message.
-4. `oauth_pending` — OAuth link sent. Returns `False` for non-calendar msgs. Returns `True` + re-surfaces link for calendar msgs.
-5. `completed` — returns `False` → normal pipeline.
+4. `provider_pending` — ask **Gmail or Outlook** (`provider_detect.py`, accent-insensitive). Re-asks on unrecognized reply. On match → mint provider state token → send correct link → `oauth_pending`.
+5. `oauth_pending` — OAuth link sent (provider per `oauth_pending_provider`). Returns `False` for non-calendar msgs. Returns `True` + re-surfaces link for calendar msgs.
+6. `completed` — returns `False` → normal pipeline.
 
 **Legacy compat:** `onboarding_completed=True` with no `onboarding_state` → treated as `completed`. No migration needed.
 
 **Location resolution** (`services/location_resolver.py`): Google Maps Geocoding + Timezone API. Statuses: `resolved|not_found|ambiguous|api_error`. On `api_error` user is NOT blocked — partial state saved, cron retries later.
 
-**Google Calendar OAuth** (`services/google_oauth.py`, `api/oauth_routes.py`):
-- Per-user Fernet-encrypted refresh tokens. State param = opaque `secrets.token_urlsafe(32)`, 1h expiry, one-time-use.
-- PKCE: `build_authorize_url()` returns `(url, code_verifier)`. Store verifier in Firestore at `/authorize`; pass to `exchange_code(code_verifier=...)` at `/callback`. (See Hard Rule #15)
-- `prompt=consent` forced so Google always returns a refresh_token.
+**Calendar OAuth — dual provider** (`services/google_oauth.py`, `services/microsoft_oauth.py`, `api/oauth_routes.py`):
+- Per-user Fernet-encrypted refresh tokens. State param = opaque `secrets.token_urlsafe(32)`, 1h expiry, one-time-use (shared `google_oauth_state_token` field — provider-neutral lookup key).
+- Google PKCE: `build_authorize_url()` returns `(url, code_verifier)`. Store verifier; pass to `exchange_code(code_verifier=...)`. (See Hard Rule #15)
+- Microsoft (MSAL): `build_authorize_url()` returns `(url, pkce_blob)` — the JSON auth-code-flow dict stored at `microsoft_oauth_flow`, passed back to `exchange_code(blob, auth_response)`; MSAL validates PKCE+state. Authority `common`.
+- `prompt=consent`/`select_account` forced so a refresh_token is always returned.
+- Routes: `/auth/{google,microsoft}/{authorize,callback}`. The callback writes the `connected_accounts` slot from `oauth_pending_slot` via `UserRepository.save_connected_account`; primary connect also sets `completed` + reminders. **All calendar consumers go through `services/calendar_accounts.py`** (merged reads, primary-only create, per-account error isolation) — never `google_calendar`/`microsoft_calendar` directly.
+- **Add a 2nd account:** `handlers/account_link_handler.py` gate — natural-language add-account phrase → ask provider → mint `slot="secondary"` token → send link. Cap = 2.
 
 **Pending expense gate** (`handlers/pending_expense_handler.py`): stashes amount/category in `user_context_store` when `needs_currency=True`. Next message intercepted for currency word → finalize + lock `preferred_currency`.
 
@@ -250,8 +255,12 @@ Async gate BEFORE the pipeline. Returns `True` (consumed) or `False` (proceed). 
 name, language ("es"|"en"), preferred_currency, timezone, location,
 latitude, longitude, location_raw, location_resolution_status,
 onboarding_state, onboarding_completed (legacy),  language_asked_count,
-google_calendar_refresh_token (Fernet), google_calendar_connected,
+google_calendar_refresh_token (Fernet), google_calendar_connected,   # legacy/primary-Google mirror, kept in sync
+connected_accounts,           # list[{provider:"google"|"microsoft", email, refresh_token (Fernet), is_primary, reminders_enabled, created_at, updated_at}] — max 2, any provider mix
+has_connected_calendar,       # bool — True iff >=1 account connected (provider-agnostic membership)
 google_oauth_state_token, google_oauth_state_expires_at, google_oauth_code_verifier,
+microsoft_oauth_flow,         # JSON MSAL auth-code-flow blob (PKCE+state), the Microsoft analogue of google_oauth_code_verifier
+oauth_pending_provider, oauth_pending_slot,   # "google"|"microsoft" / "primary"|"secondary" — what the live state token's callback writes
 oauth_link_sent_at, oauth_followup_due_at, oauth_followup_sent_at,
 calendar_reminders_enabled,   # True by default on connect; explicit False = opted out
 notified_event_ids,           # list[str] "{eventId}:{YYYY-MM-DD}" — capped at 100
@@ -262,6 +271,7 @@ created_at, updated_at
 - `preferred_currency`: not set during onboarding. Locked on first expense with explicit currency.
 - `timezone`: IANA tz. Falls back to `"UTC"` only on geocoding failure (pending retry).
 - `notified_event_ids`: keyed by local date so recurring events get one reminder per day.
+- `connected_accounts`: provider-agnostic calendar accounts. **Legacy compat (no migration):** a pre-existing user with only the flat `google_calendar_refresh_token` is surfaced as one primary Google account by `calendar_accounts.iter_calendar_accounts`. New connects also keep the legacy `google_calendar_*` fields in sync when the primary is Google. Reads merge all accounts; event creation goes to the primary. Backfill: `app/scripts/backfill_connected_accounts.py` (optional — runtime works without it via the shim).
 
 **`expenses`** (auto ID): `user_phone_number, amount, currency, category, confidence, user_message, source, created_at`
 - `category`: `"food"|"transport"|"shopping"|"health"|"other"`. `source`: always `"whatsapp user's chat"`.
@@ -303,7 +313,7 @@ updated_at: ISO str
 app/
 ├── api/
 │   ├── whatsapp_webhook.py          # Thin dispatcher: verify, normalize, gates, 4-layer pipeline
-│   ├── oauth_routes.py              # /auth/google/authorize|callback|done
+│   ├── oauth_routes.py              # /auth/{google,microsoft}/authorize|callback + /auth/done
 │   ├── cron_routes.py               # /cron/oauth-followups (X-Cron-Secret protected)
 │   └── admin_routes.py              # /admin/broadcasts (X-Cron-Secret protected)
 ├── parser/
@@ -331,7 +341,8 @@ app/
 │   ├── pending_expense_handler.py
 │   ├── pending_event_handler.py
 │   ├── pending_travel_handler.py    # location + departure-reminder gate
-│   └── pending_list_handler.py      # list choice / delete-confirm / disambiguation gate
+│   ├── pending_list_handler.py      # list choice / delete-confirm / disambiguation gate
+│   └── account_link_handler.py      # add-2nd-calendar-account gate (provider ask + link)
 ├── repositories/
 │   ├── expense_repository.py
 │   ├── user_repository.py
@@ -348,8 +359,13 @@ app/
 │   ├── inbound_message.py
 │   └── webhook_event.py
 ├── services/
-│   ├── google_calendar.py           # get_today_events_for_user, create_event_for_user, get_upcoming_events_window
+│   ├── google_calendar.py           # Google: get_today_events_for_user, create_event_for_user, get_upcoming_events_window, normalize_events
+│   ├── microsoft_calendar.py        # Microsoft Graph sibling — returns Google-shaped event dicts
+│   ├── calendar_accounts.py         # provider-agnostic merged accessor — ALL calendar consumers use this
 │   ├── google_oauth.py              # build_authorize_url(), exchange_code()
+│   ├── microsoft_oauth.py           # MSAL build_authorize_url(), exchange_code()
+│   ├── provider_detect.py           # accent-insensitive Gmail/Outlook detection
+│   ├── calendar_reconnect.py        # provider-aware dead-token reconnect flow
 │   ├── location_resolver.py
 │   ├── token_crypto.py              # Fernet encrypt/decrypt
 │   ├── maps/maps_service.py
@@ -360,6 +376,7 @@ app/
 │   └── whatsapp_sender.py           # send_whatsapp_message (fire-and-forget) + send_whatsapp_message_with_status (returns bool)
 ├── scripts/
 │   ├── reauthorize_calendar.py
+│   ├── backfill_connected_accounts.py  # one-time legacy→connected_accounts migration (optional)
 │   └── run_morning_brief.py
 ├── core/
 │   └── firebase.py
@@ -388,6 +405,10 @@ OPENWEATHER_API_KEY
 GOOGLE_OAUTH_CLIENT_ID
 GOOGLE_OAUTH_CLIENT_SECRET
 GOOGLE_OAUTH_REDIRECT_URI           # https://<domain>/auth/google/callback
+MICROSOFT_OAUTH_CLIENT_ID           # Azure AD app (Entra) registration
+MICROSOFT_OAUTH_CLIENT_SECRET
+MICROSOFT_OAUTH_REDIRECT_URI        # https://<domain>/auth/microsoft/callback
+MICROSOFT_OAUTH_TENANT              # "common" — personal + work/school Outlook
 PUBLIC_BASE_URL
 CALENDAR_TOKEN_ENCRYPTION_KEY       # Fernet key — generate once, never rotate
 CRON_SHARED_SECRET

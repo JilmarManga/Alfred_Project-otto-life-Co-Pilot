@@ -4,8 +4,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.repositories.user_repository import UserRepository
-from app.services import google_oauth
-from app.services.google_calendar import get_today_events_for_user
+from app.services import google_oauth, microsoft_oauth
+from app.services import google_calendar, microsoft_calendar
 from app.services.token_crypto import encrypt, TokenCryptoError
 from app.services.whatsapp_sender import send_whatsapp_message
 
@@ -71,6 +71,84 @@ _DONE_PAGE = f"""
 """
 
 
+_CALENDAR_SERVICE = {
+    "google": google_calendar,
+    "microsoft": microsoft_calendar,
+}
+
+
+def _exchange_failed_copy(language: str) -> str:
+    return (
+        "I couldn't connect your account just now — please try the link again."
+        if language == "en"
+        else "No pude conectar tu cuenta en este momento — intenta el enlace de nuevo."
+    )
+
+
+def _connected_copy(language: str, event_count: int, slot: str) -> str:
+    """Bilingual confirmation. Primary = onboarding wording (first briefing
+    tomorrow); secondary = 'second account, calendars now merged'."""
+    en = language == "en"
+    if slot == "secondary":
+        if en:
+            return ("Second account connected ✅\n\nI'll now combine events "
+                    "from both calendars. Ask me anything.")
+        return ("Segunda cuenta conectada ✅\n\nAhora combinaré los eventos de "
+                "ambos calendarios. Pregúntame lo que quieras.")
+    if event_count == 0:
+        return (
+            "Calendar connected ✅\n\nNothing on your calendar today — enjoy it 🙂\n\nYour first briefing arrives tomorrow morning. Ask me anything in the meantime."
+            if en
+            else "Calendario conectado ✅\n\nNo tienes nada hoy — disfrútalo 🙂\n\nTu primer resumen llega mañana por la mañana. Mientras tanto, pregúntame lo que quieras."
+        )
+    return (
+        f"Calendar connected ✅\n\nYou have {event_count} event(s) today.\nYour first briefing arrives tomorrow morning.\n\nUntil then, ask me anything."
+        if en
+        else f"Calendario conectado ✅\n\nTienes {event_count} evento(s) hoy.\nTu primer resumen llega mañana por la mañana.\n\nMientras tanto, pregúntame lo que quieras."
+    )
+
+
+def _finalize_connection(user: dict, provider: str, refresh_token: str):
+    """Shared success path for both providers. Encrypt → save into the right
+    connected_accounts slot → confirm. Returns a RedirectResponse on success
+    or an HTMLResponse on a (gracefully handled) failure."""
+    phone = user["phone"]
+    language = (user.get("language") or "en").lower()
+    slot = user.get("oauth_pending_slot") or "primary"
+
+    try:
+        encrypted = encrypt(refresh_token)
+    except TokenCryptoError as exc:
+        logger.exception("Token encryption failed for %s: %s", phone, exc)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    UserRepository.save_connected_account(
+        phone,
+        provider=provider,
+        encrypted_refresh_token=encrypted,
+        slot=slot,
+    )
+    UserRepository.clear_oauth_state(phone)
+    if slot == "primary":
+        # Onboarding / primary (re)connect mirrors the original Google flow.
+        UserRepository.set_calendar_reminders_enabled(phone, True)
+        UserRepository.set_onboarding_state(phone, "completed")
+
+    try:
+        events = _CALENDAR_SERVICE[provider].get_today_events_for_user(refresh_token)
+        send_whatsapp_message(phone, _connected_copy(language, len(events), slot))
+    except Exception as exc:
+        logger.exception("Post-callback event fetch failed for %s: %s", phone, exc)
+        send_whatsapp_message(
+            phone,
+            "Calendar connected ✅ — I'll have your briefing ready tomorrow morning."
+            if language == "en"
+            else "Calendario conectado ✅ — tendré tu resumen listo mañana por la mañana.",
+        )
+
+    return RedirectResponse(url="/auth/done")
+
+
 @router.get("/auth/google/authorize")
 async def authorize(state: str = ""):
     """
@@ -91,10 +169,14 @@ async def authorize(state: str = ""):
         return HTMLResponse(_EXPIRED_PAGE, status_code=500)
 
     if code_verifier:
+        # Preserve the provider/slot chosen at link-mint time (a Google
+        # second-account add must stay slot='secondary').
         UserRepository.set_oauth_state_token(
             user["phone"], state,
             user.get("google_oauth_state_expires_at"),
             code_verifier=code_verifier,
+            provider="google",
+            slot=user.get("oauth_pending_slot") or "primary",
         )
 
     return RedirectResponse(url)
@@ -104,7 +186,7 @@ async def authorize(state: str = ""):
 async def callback(request: Request):
     """
     Google redirects here after user consent.
-    Exchange code → refresh_token, encrypt, save, fetch today's events,
+    Exchange code → refresh_token, encrypt, save into the right account slot,
     send WhatsApp confirmation, redirect to /auth/done.
     """
     params = dict(request.query_params)
@@ -127,50 +209,69 @@ async def callback(request: Request):
         code_verifier = user.get("google_oauth_code_verifier")
         refresh_token = google_oauth.exchange_code(code=code, state_token=state, code_verifier=code_verifier)
     except Exception as exc:
-        logger.exception("OAuth code exchange failed for %s: %s", phone, exc)
-        send_whatsapp_message(
-            phone,
-            "I couldn't connect your calendar just now — please try the link again.",
-        )
+        logger.exception("Google OAuth code exchange failed for %s: %s", phone, exc)
+        send_whatsapp_message(phone, _exchange_failed_copy((user.get("language") or "en").lower()))
         return HTMLResponse(_EXPIRED_PAGE, status_code=500)
 
+    return _finalize_connection(user, "google", refresh_token)
+
+
+@router.get("/auth/microsoft/authorize")
+async def microsoft_authorize(state: str = ""):
+    """Redirect the user to Microsoft's consent screen (mirrors Google)."""
+    if not state:
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    user = UserRepository.get_user_by_oauth_state(state)
+    if not user:
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
     try:
-        encrypted = encrypt(refresh_token)
-    except TokenCryptoError as exc:
-        logger.exception("Token encryption failed for %s: %s", phone, exc)
-        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
-
-    UserRepository.save_calendar_credentials(phone, encrypted)
-    UserRepository.set_calendar_reminders_enabled(phone, True)
-    UserRepository.clear_oauth_state(phone)
-    UserRepository.set_onboarding_state(phone, "completed")
-
-    try:
-        events = get_today_events_for_user(refresh_token)
-        event_count = len(events)
-        language = (user.get("language") or "en").lower()
-
-        if event_count == 0:
-            msg = (
-                "Calendar connected ✅\n\nNothing on your calendar today — enjoy it 🙂\n\nYour first briefing arrives tomorrow morning. Ask me anything in the meantime."
-                if language == "en"
-                else "Calendario conectado ✅\n\nNo tienes nada hoy — disfrútalo 🙂\n\nTu primer resumen llega mañana por la mañana. Mientras tanto, pregúntame lo que quieras."
-            )
-        else:
-            msg = (
-                f"Calendar connected ✅\n\nYou have {event_count} event(s) today.\nYour first briefing arrives tomorrow morning.\n\nUntil then, ask me anything."
-                if language == "en"
-                else f"Calendario conectado ✅\n\nTienes {event_count} evento(s) hoy.\nTu primer resumen llega mañana por la mañana.\n\nMientras tanto, pregúntame lo que quieras."
-            )
-        send_whatsapp_message(phone, msg)
+        url, pkce_blob = microsoft_oauth.build_authorize_url(state_token=state)
     except Exception as exc:
-        logger.exception("Post-callback event fetch failed for %s: %s", phone, exc)
-        send_whatsapp_message(
-            phone,
-            "Calendar connected ✅ — I'll have your briefing ready tomorrow morning.",
-        )
+        logger.exception("Failed to build Microsoft authorize URL: %s", exc)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
 
-    return RedirectResponse(url="/auth/done")
+    UserRepository.set_oauth_state_token(
+        user["phone"], state,
+        user.get("google_oauth_state_expires_at"),
+        code_verifier=pkce_blob,
+        provider="microsoft",
+        slot=user.get("oauth_pending_slot") or "primary",
+    )
+
+    return RedirectResponse(url)
+
+
+@router.get("/auth/microsoft/callback")
+async def microsoft_callback(request: Request):
+    """Microsoft redirects here after consent. MSAL validates PKCE + state
+    from the stored flow blob, then we reuse the shared success path."""
+    params = dict(request.query_params)
+    code = params.get("code")
+    state = params.get("state")
+    error = params.get("error")
+
+    if error or not code or not state:
+        logger.warning("MS OAuth callback missing code/state or has error: %s", params)
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    user = UserRepository.get_user_by_oauth_state(state)
+    if not user:
+        logger.warning("MS OAuth callback: no user for state token (expired or unknown)")
+        return HTMLResponse(_EXPIRED_PAGE, status_code=400)
+
+    phone = user["phone"]
+
+    try:
+        pkce_blob = user.get("microsoft_oauth_flow")
+        refresh_token = microsoft_oauth.exchange_code(pkce_blob, params)
+    except Exception as exc:
+        logger.exception("Microsoft OAuth code exchange failed for %s: %s", phone, exc)
+        send_whatsapp_message(phone, _exchange_failed_copy((user.get("language") or "en").lower()))
+        return HTMLResponse(_EXPIRED_PAGE, status_code=500)
+
+    return _finalize_connection(user, "microsoft", refresh_token)
 
 
 @router.get("/auth/done")
