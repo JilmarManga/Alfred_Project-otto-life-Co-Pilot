@@ -64,7 +64,11 @@ def build_authorize_url(state_token: str) -> tuple[str, Optional[str]]:
     url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="false",
-        prompt="consent",
+        # select_account → always show the Google account chooser so the user
+        # picks which account to grant Drive to (not the silently signed-in
+        # one). consent → still force the consent screen so a refresh_token
+        # is always returned.
+        prompt="select_account consent",
     )
     return url, flow.code_verifier
 
