@@ -222,13 +222,14 @@ async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bo
         lowered = text.lower()
         if any(kw in lowered for kw in _CALENDAR_INTENT_KEYWORDS):
             provider = user.get("oauth_pending_provider") or "google"
-            state_token = user.get("google_oauth_state_token")
-            if not state_token:
-                state_token = secrets.token_urlsafe(32)
-                UserRepository.set_oauth_state_token(
-                    phone, state_token, datetime.utcnow() + timedelta(hours=1),
-                    provider=provider, slot="primary",
-                )
+            # Always mint a fresh token + expiry. Reusing the stored token
+            # re-ships a link that is already past its 1h TTL (single-use
+            # semantics mean the old one is dead anyway).
+            state_token = secrets.token_urlsafe(32)
+            UserRepository.set_oauth_state_token(
+                phone, state_token, datetime.utcnow() + timedelta(hours=1),
+                provider=provider, slot="primary",
+            )
             link = _build_authorize_url(state_token, provider)
             lang = (user.get("language") or "en").lower()
             send_whatsapp_message(
