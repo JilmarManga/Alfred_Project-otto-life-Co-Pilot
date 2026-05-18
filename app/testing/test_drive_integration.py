@@ -270,6 +270,73 @@ def test_router_non_drive_unaffected(text):
     assert d.agent.__class__.__name__ != "DriveAgent"
 
 
+# ── uploaded Office files: read-only support ────────────────────────────────
+
+def _xlsx_bytes(rows):
+    import io
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _docx_bytes(paragraphs):
+    import io
+    from docx import Document
+    doc = Document()
+    for p in paragraphs:
+        doc.add_paragraph(p)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_xlsx_parsed_to_csv():
+    from app.services.google_drive import _xlsx_to_csv
+    out = _xlsx_to_csv(_xlsx_bytes([["cliente", "estado"], ["pepito", "ok"]]))
+    assert "cliente,estado" in out and "pepito,ok" in out
+
+
+def test_docx_parsed_to_text():
+    from app.services.google_drive import _docx_to_text
+    out = _docx_to_text(_docx_bytes(["Informe Abril", "Total: 2000000"]))
+    assert "Informe Abril" in out and "Total: 2000000" in out
+
+
+def test_get_content_routes_xlsx_and_docx():
+    from app.services import google_drive
+    with patch("app.services.google_drive.get_drive_service_for_user",
+               return_value=MagicMock()), \
+         patch("app.services.google_drive._download_bytes",
+               return_value=_xlsx_bytes([["a", "b"], ["1", "2"]])):
+        out = google_drive.get_content("rt", "F1", google_drive.XLSX)
+    assert "a,b" in out and "1,2" in out
+
+
+def test_office_files_have_no_write_path():
+    """Read-only guarantee: a modify request against an uploaded .xlsx is
+    refused (edit_unsupported_for_type) and NOTHING is written."""
+    pm = _pm("set estado OK for cliente pepito in Prueba",
+             drive_intent="modify", drive_file_ref="Prueba",
+             drive_edit={"op": "set_cell", "locator_column": "cliente",
+                         "locator_value": "pepito", "target_column": "estado",
+                         "new_value": "OK"})
+    XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    update_user_context(USER["phone_number"], "pending_drive", None)
+    with patch("app.agents.drive_agent._shared.drive_client.decrypt", return_value="rt"), \
+         patch("app.services.google_drive.search_files",
+               return_value=[{"id": "X1", "name": "Prueba", "mimeType": XLSX}]), \
+         patch("app.services.google_drive.update_sheet_cell") as wrote:
+        res = DriveAgent().execute(pm, USER)
+    assert res.error_message == "edit_unsupported_for_type"
+    wrote.assert_not_called()
+    assert get_user_context(USER["phone_number"]).get("pending_drive") is None
+
+
 # ── connect-link side effect ────────────────────────────────────────────────
 
 def test_not_connected_sends_link_and_stays_silent():
