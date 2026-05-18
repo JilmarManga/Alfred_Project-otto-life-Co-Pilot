@@ -337,6 +337,33 @@ def test_office_files_have_no_write_path():
     assert get_user_context(USER["phone_number"]).get("pending_drive") is None
 
 
+# ── missing-filename follow-up flow ─────────────────────────────────────────
+
+def test_missing_file_ref_arms_pending_and_gate_resolves_it():
+    update_user_context(USER["phone_number"], "pending_drive", None)
+    # 1. "analiza ese documento" — intent but no filename → arm pending.
+    pm = _pm("puedes hacer un analisis de ese documento",
+             drive_intent="analyze", drive_file_ref=None)
+    with patch("app.agents.drive_agent._shared.drive_client.decrypt",
+               return_value="rt"):
+        res = DriveAgent().execute(pm, USER)
+    assert res.error_message == "missing_file_ref"
+    pend = get_user_context(USER["phone_number"])["pending_drive"]
+    assert pend["step"] == "awaiting_file_ref" and pend["intent"] == "analyze"
+
+    # 2. The user's next reply is the (quoted) filename → gate re-runs analyze.
+    with patch("app.agents.drive_agent._shared.drive_client.decrypt", return_value="rt"), \
+         patch("app.services.google_drive.search_files",
+               return_value=[{"id": "X1", "name": "Prueba Copiloto Abril 2026",
+                              "mimeType": SHEET_MIME}]), \
+         patch("app.services.google_drive.get_content", return_value="cliente,estado"), \
+         patch("app.handlers.pending_drive_handler.send_whatsapp_message") as sw:
+        consumed = handle_pending_drive(_ib('"Prueba Copiloto Abril 2026"'), USER)
+    assert consumed is True
+    assert sw.called and sw.call_args[0][1]  # a real reply was sent, not a greeting
+    assert get_user_context(USER["phone_number"]).get("pending_drive") is None
+
+
 # ── connect-link side effect ────────────────────────────────────────────────
 
 def test_not_connected_sends_link_and_stays_silent():

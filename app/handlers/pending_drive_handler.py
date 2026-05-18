@@ -134,7 +134,8 @@ def handle_pending_drive(inbound: InboundMessage, user: Optional[dict]) -> bool:
         return False
 
     step = pending.get("step")
-    if step not in {"awaiting_file_choice", "awaiting_modify_confirmation"}:
+    if step not in {"awaiting_file_ref", "awaiting_file_choice",
+                    "awaiting_modify_confirmation"}:
         update_user_context(phone, "pending_drive", None)
         return False
 
@@ -158,9 +159,48 @@ def handle_pending_drive(inbound: InboundMessage, user: Optional[dict]) -> bool:
         update_user_context(phone, "pending_drive", None)
         return False
 
+    if step == "awaiting_file_ref":
+        return _handle_file_ref(phone, text, lang, user, pending)
     if step == "awaiting_file_choice":
         return _handle_file_choice(phone, text, lang, user, pending)
     return _handle_modify_confirmation(phone, text, lang, user, pending)
+
+
+def _handle_file_ref(phone: str, text: str, lang: str, user: dict, pending: dict) -> bool:
+    """The user was asked 'which file?' — treat this reply as the filename and
+    re-run the ORIGINAL intent against it."""
+    from app.agents.drive_agent import DriveAgent
+    from app.agents.drive_agent.skill_context import SkillContext
+
+    ref = text.strip().strip('"').strip("'").strip()
+    if not ref:
+        # Keep the stash so they can try again.
+        send_whatsapp_message(
+            phone, _UNKNOWN_CHOICE_ACK.get(lang, _UNKNOWN_CHOICE_ACK["es"]),
+        )
+        return True
+
+    intent = pending.get("intent") or "read"
+    skill = _INTENT_TO_SKILL.get(intent, "read_file")
+    payload = {"file_ref": ref}
+    if intent == "modify" and pending.get("edit_spec"):
+        payload["edit_spec"] = pending["edit_spec"]
+
+    # Clear before dispatch; a modify will set its own confirmation stash, and
+    # an ambiguous name will set its own awaiting_file_choice stash.
+    update_user_context(phone, "pending_drive", None)
+
+    user_with_phone = {**user, "phone_number": phone}
+    result = DriveAgent().run_skill(
+        skill,
+        SkillContext(user=user_with_phone,
+                     inbound_text=pending.get("original_text") or text,
+                     payload=payload),
+    )
+    reply = format_response(result, user_with_phone)
+    if reply:
+        send_whatsapp_message(phone, reply)
+    return True
 
 
 def _handle_file_choice(phone: str, text: str, lang: str, user: dict, pending: dict) -> bool:

@@ -16,6 +16,7 @@ codebase: on a dead/missing token the agent sends the (re)connect link as a
 side effect and returns a silent handled sentinel so Layer 4 emits nothing.
 """
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.agents.base_agent import BaseAgent
@@ -73,6 +74,14 @@ class DriveAgent(BaseAgent):
         "apply_modification": ApplyModificationSkill,
     }
 
+    # Reverse map used to re-arm a pending file-ref ask on missing_file_ref.
+    _SKILL_TO_INTENT = {
+        "find_file": "find",
+        "read_file": "read",
+        "analyze_file": "analyze",
+        "propose_modification": "modify",
+    }
+
     # ------------------------------------------------------------------ #
     # Public entry points                                                  #
     # ------------------------------------------------------------------ #
@@ -106,7 +115,25 @@ class DriveAgent(BaseAgent):
             inbound_text=parsed.raw_message,
             payload={},
         )
-        return self._run(skill_name, ctx)
+        result = self._run(skill_name, ctx)
+
+        # The user named an intent ("analyze this doc") but no filename could be
+        # extracted (e.g. "ese documento"). The responder asks "which file?";
+        # stash the intent so the pending-drive gate captures the next reply as
+        # the filename and re-runs the ORIGINAL intent — instead of that reply
+        # falling through the whole pipeline into a greeting.
+        if result.error_message == "missing_file_ref":
+            phone = user.get("phone_number") or user.get("phone")
+            intent = self._SKILL_TO_INTENT.get(skill_name)
+            if phone and intent:
+                update_user_context(phone, "pending_drive", {
+                    "step": "awaiting_file_ref",
+                    "intent": intent,
+                    "original_text": parsed.raw_message,
+                    "edit_spec": getattr(parsed, "drive_edit", None),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+        return result
 
     def run_skill(self, skill_name: str, ctx: SkillContext) -> AgentResult:
         """Gate entry. Handlers that already know the skill call this directly,
