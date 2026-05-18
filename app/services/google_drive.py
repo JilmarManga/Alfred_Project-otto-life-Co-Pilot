@@ -9,6 +9,7 @@ Sheets/Docs APIs; structured edits (Phase 3+) add those APIs on the same
 when the stored refresh token can no longer be exchanged (revoked/expired) so
 callers can clear it and send a reconnect link.
 """
+import csv
 import io
 import logging
 import os
@@ -27,6 +28,12 @@ SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 GOOGLE_DOC = "application/vnd.google-apps.document"
 GOOGLE_SHEET = "application/vnd.google-apps.spreadsheet"
+
+# Uploaded (non-native) Office files. READ-ONLY: parsed locally for
+# read/analyze. The modify path in propose_modification deliberately rejects
+# these (mime != GOOGLE_SHEET / GOOGLE_DOC) so no write path is added here.
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # A read/analyze cap so we never hand an unbounded blob to the Layer-4 LLM.
 MAX_CONTENT_CHARS = 12000
@@ -128,6 +135,56 @@ def _download_text(service, file_id: str) -> str:
     return buf.getvalue().decode("utf-8", errors="replace")
 
 
+def _download_bytes(service, file_id: str) -> bytes:
+    buf = io.BytesIO()
+    request = service.files().get_media(fileId=file_id)
+    downloader = MediaIoBaseDownload(buf, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return buf.getvalue()
+
+
+def _xlsx_to_csv(data: bytes) -> str:
+    """Render an uploaded .xlsx as CSV text, one block per sheet — the same
+    shape as a native Sheet's CSV export so analysis is consistent."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        sheets = wb.worksheets
+        out: List[str] = []
+        multi = len(sheets) > 1
+        for ws in sheets:
+            if multi:
+                out.append(f"# Sheet: {ws.title}")
+            sbuf = io.StringIO()
+            writer = csv.writer(sbuf)
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow(["" if c is None else c for c in row])
+                if sbuf.tell() > MAX_CONTENT_CHARS:
+                    break
+            out.append(sbuf.getvalue().rstrip("\r\n"))
+        return "\n".join(out)
+    finally:
+        wb.close()
+
+
+def _docx_to_text(data: bytes) -> str:
+    """Render an uploaded .docx as plain text: paragraphs, then any tables
+    (one row per line, cells joined by ' | ')."""
+    from docx import Document
+
+    doc = Document(io.BytesIO(data))
+    parts = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n".join(parts)
+
+
 def list_sheet_tabs(refresh_token: str, spreadsheet_id: str) -> List[str]:
     """Tab/sheet titles in a spreadsheet, in order."""
     service = get_sheets_service_for_user(refresh_token)
@@ -161,6 +218,8 @@ def get_content(refresh_token: str, file_id: str, mime_type: str) -> Optional[st
       - Google Doc   → exported text/plain
       - Google Sheet → exported text/csv
       - text/*       → raw download
+      - .xlsx        → parsed locally to CSV  (read-only)
+      - .docx        → parsed locally to text (read-only)
 
     Returns None for unsupported binary types (image/PDF/etc.) — the caller
     surfaces an `unsupported_file_type` message. Truncated to
@@ -173,6 +232,10 @@ def get_content(refresh_token: str, file_id: str, mime_type: str) -> Optional[st
         text = _export_text(service, file_id, "text/csv")
     elif mime_type.startswith("text/"):
         text = _download_text(service, file_id)
+    elif mime_type == XLSX:
+        text = _xlsx_to_csv(_download_bytes(service, file_id))
+    elif mime_type == DOCX:
+        text = _docx_to_text(_download_bytes(service, file_id))
     else:
         return None
     if len(text) > MAX_CONTENT_CHARS:
