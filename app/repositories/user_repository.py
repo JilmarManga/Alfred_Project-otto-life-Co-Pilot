@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
 
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -102,8 +102,9 @@ class UserRepository:
         for doc in query.stream():
             data = doc.to_dict() or {}
             expires_at = data.get("google_oauth_state_expires_at")
-            if expires_at and hasattr(expires_at, "timestamp"):
-                if datetime.utcnow().timestamp() > expires_at.timestamp():
+            if expires_at is not None and hasattr(expires_at, "timestamp"):
+                exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) > exp:
                     return None
             data["phone"] = doc.id
             return data
@@ -158,8 +159,9 @@ class UserRepository:
         for doc in query.stream():
             data = doc.to_dict() or {}
             expires_at = data.get("google_drive_oauth_state_expires_at")
-            if expires_at and hasattr(expires_at, "timestamp"):
-                if datetime.utcnow().timestamp() > expires_at.timestamp():
+            if expires_at is not None and hasattr(expires_at, "timestamp"):
+                exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) > exp:
                     return None
             data["phone"] = doc.id
             return data
@@ -380,7 +382,9 @@ class UserRepository:
         3h followup is due. Applied Python-side filtering keeps the Firestore
         query simple (no composite index needed for V1.0.0 volume).
         """
-        now = now or datetime.utcnow()
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
         query = (
             db.collection(UserRepository.COLLECTION_NAME)
             .where(filter=FieldFilter("onboarding_state", "==", "oauth_pending"))
@@ -393,8 +397,10 @@ class UserRepository:
             due = data.get("oauth_followup_due_at")
             if due is None:
                 continue
-            if hasattr(due, "timestamp") and due.timestamp() > now.timestamp():
-                continue
+            if due is not None and hasattr(due, "timestamp"):
+                due_aware = due if due.tzinfo else due.replace(tzinfo=timezone.utc)
+                if due_aware > now:
+                    continue
             data["phone"] = doc.id
             results.append(data)
         return results
