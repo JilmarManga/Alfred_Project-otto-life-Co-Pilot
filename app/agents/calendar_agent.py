@@ -7,15 +7,17 @@ from app.models.agent_result import AgentResult
 from app.services.calendar_reconnect import handle_token_invalid
 from app.services.google_calendar import (
     CalendarTokenInvalid,
-    get_today_events_for_user,
     normalize_events,
     summarize_day,
     format_events_detailed,
-    create_event_for_user,
+)
+from app.services.calendar_accounts import (
+    iter_calendar_accounts,
+    get_today_events_merged,
+    create_event_on_primary,
 )
 from app.services.maps.maps_service import estimate_travel_info
 from app.services.weather.weather_service import get_weather_for_today
-from app.services.token_crypto import decrypt
 from app.db.user_context_store import get_user_context, update_user_context
 from app.parser.message_parser import (
     CREATE_KEYWORDS,
@@ -54,11 +56,11 @@ def _find_next_upcoming_event(events: list) -> dict | None:
 
 class CalendarAgent(BaseAgent):
 
-    def _get_refresh_token(self, user: dict) -> str:
-        encrypted = user.get("google_calendar_refresh_token")
-        if not encrypted:
+    def _ensure_connected(self, user: dict) -> None:
+        """Raise ValueError('calendar_not_connected') if the user has no
+        connected calendar account (any provider)."""
+        if not iter_calendar_accounts(user):
             raise ValueError("calendar_not_connected")
-        return decrypt(encrypted)
 
     def execute(self, parsed: ParsedMessage, user: dict) -> AgentResult:
         try:
@@ -73,14 +75,14 @@ class CalendarAgent(BaseAgent):
             if signals & REMINDER_ON_KEYWORDS:
                 return self._handle_reminder_toggle(phone, enabled=True)
 
-            refresh_token = self._get_refresh_token(user)
+            self._ensure_connected(user)
 
             has_create_kw = bool(signals & CREATE_KEYWORDS)
             has_event_fields = bool(parsed.event_title and parsed.event_start)
 
             # 1. Clear creation: verb + fields
             if has_create_kw and has_event_fields:
-                return self._handle_creation(parsed, user, refresh_token)
+                return self._handle_creation(parsed, user)
 
             # 2. Create verb but missing details
             if has_create_kw and not has_event_fields:
@@ -97,14 +99,15 @@ class CalendarAgent(BaseAgent):
             # 4. Existing paths (unchanged)
             event_ref = parsed.event_reference
             if event_ref is not None:
-                return self._handle_followup(parsed, user, phone, event_ref, refresh_token)
+                return self._handle_followup(parsed, user, phone, event_ref)
 
-            return self._handle_query(phone, refresh_token)
+            return self._handle_query(phone, user)
 
         except CalendarTokenInvalid as e:
             logger.warning("Calendar token invalid for %s: %s", phone, e)
             lang = (user.get("language") or "es").lower()
-            handle_token_invalid(phone, lang)
+            provider = getattr(e, "provider", "google")
+            handle_token_invalid(phone, lang, provider)
             return AgentResult(
                 agent_name="CalendarAgent",
                 success=True,
@@ -129,8 +132,8 @@ class CalendarAgent(BaseAgent):
                 error_message=str(e),
             )
 
-    def _handle_query(self, phone: str, refresh_token: str) -> AgentResult:
-        events_raw = get_today_events_for_user(refresh_token)
+    def _handle_query(self, phone: str, user: dict) -> AgentResult:
+        events_raw = get_today_events_merged(user)
         events = normalize_events(events_raw) if events_raw else []
 
         update_user_context(phone, "today_events", events)
@@ -148,17 +151,17 @@ class CalendarAgent(BaseAgent):
             },
         )
 
-    def _handle_followup(self, parsed: ParsedMessage, user: dict, phone: str, event_ref, refresh_token: str) -> AgentResult:
+    def _handle_followup(self, parsed: ParsedMessage, user: dict, phone: str, event_ref) -> AgentResult:
         context = get_user_context(phone)
         events = context.get("today_events", [])
 
         if not events:
-            events = normalize_events(get_today_events_for_user(refresh_token) or [])
+            events = normalize_events(get_today_events_merged(user) or [])
             update_user_context(phone, "today_events", events)
 
         # "Next event" — find upcoming event + add weather
         if event_ref.time_reference == "next":
-            return self._handle_next_event(user, events, refresh_token)
+            return self._handle_next_event(user, events)
 
         # Specific event by ordinal (second, tercero, etc.)
         selected_event = None
@@ -205,9 +208,9 @@ class CalendarAgent(BaseAgent):
             },
         )
 
-    def _handle_next_event(self, user: dict, events: list, refresh_token: str) -> AgentResult:
+    def _handle_next_event(self, user: dict, events: list) -> AgentResult:
         if not events:
-            events = normalize_events(get_today_events_for_user(refresh_token) or [])
+            events = normalize_events(get_today_events_merged(user) or [])
 
         event = _find_next_upcoming_event(events)
         if not event:
@@ -248,7 +251,7 @@ class CalendarAgent(BaseAgent):
             },
         )
 
-    def _handle_creation(self, parsed: ParsedMessage, user: dict, refresh_token: str) -> AgentResult:
+    def _handle_creation(self, parsed: ParsedMessage, user: dict) -> AgentResult:
         try:
             start_dt = datetime.fromisoformat(parsed.event_start)
         except (ValueError, TypeError):
@@ -266,14 +269,18 @@ class CalendarAgent(BaseAgent):
         lang = (user.get("language") or "es").lower()
 
         try:
-            event = create_event_for_user(
-                refresh_token,
+            event = create_event_on_primary(
+                user,
                 title=parsed.event_title,
                 start_iso=start_dt.isoformat(),
                 end_iso=end_dt.isoformat(),
                 timezone_str=tz_str,
                 location=parsed.event_location,
             )
+        except CalendarTokenInvalid:
+            # Let execute()'s handler route the user through the correct
+            # provider reconnect link instead of a generic create error.
+            raise
         except Exception as exc:
             logger.exception("Calendar event creation failed: %s", exc)
             return AgentResult(

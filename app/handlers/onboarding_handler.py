@@ -16,6 +16,7 @@ from app.services.location_resolver import (
     STATUS_NOT_FOUND,
     STATUS_RESOLVED,
 )
+from app.services.provider_detect import detect_provider
 from app.services.whatsapp_sender import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -24,8 +25,11 @@ STATE_LANGUAGE_PENDING = "language_pending"
 STATE_BETA_PENDING = "beta_pending"
 STATE_PROFILE_PENDING = "profile_pending"
 STATE_LOCATION_RETRY = "location_retry"
+STATE_PROVIDER_PENDING = "provider_pending"
 STATE_OAUTH_PENDING = "oauth_pending"
 STATE_COMPLETED = "completed"
+
+_PROVIDER_NAME = {"google": "Google", "microsoft": "Outlook"}
 
 _CALENDAR_INTENT_KEYWORDS = {
     "calendar", "calendario", "schedule", "agenda", "reunion", "reunión",
@@ -61,19 +65,36 @@ def _derive_state(user: Optional[dict]) -> str:
     return STATE_PROFILE_PENDING
 
 
-def _build_authorize_url(state_token: str) -> str:
+def _build_authorize_url(state_token: str, provider: str = "google") -> str:
     base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
-    return f"{base}/auth/google/authorize?state={state_token}"
+    return f"{base}/auth/{provider}/authorize?state={state_token}"
 
 
-def _send_oauth_link(phone: str, user: dict) -> None:
-    state_token = secrets.token_urlsafe(32)
-    expires_at = datetime.utcnow() + timedelta(hours=1)
-    UserRepository.set_oauth_state_token(phone, state_token, expires_at)
-    link = _build_authorize_url(state_token)
+def _ask_provider(phone: str, user: dict) -> None:
+    """After location is resolved, ask which calendar provider the user uses
+    so we send the correct OAuth link."""
     lang = (user.get("language") or "en").lower()
     name = user.get("name") or ""
-    send_whatsapp_message(phone, onboarding_copy.get("oauth_link", lang, name=name, link=link))
+    UserRepository.set_onboarding_state(phone, STATE_PROVIDER_PENDING)
+    send_whatsapp_message(phone, onboarding_copy.get("provider_prompt", lang, name=name))
+
+
+def _send_oauth_link(phone: str, user: dict, provider: str = "google") -> None:
+    state_token = secrets.token_urlsafe(32)
+    expires_at = datetime.utcnow() + timedelta(hours=1)
+    UserRepository.set_oauth_state_token(
+        phone, state_token, expires_at, provider=provider, slot="primary"
+    )
+    link = _build_authorize_url(state_token, provider)
+    lang = (user.get("language") or "en").lower()
+    name = user.get("name") or ""
+    send_whatsapp_message(
+        phone,
+        onboarding_copy.get(
+            "oauth_link", lang, name=name, link=link,
+            provider_name=_PROVIDER_NAME.get(provider, "Google"),
+        ),
+    )
     UserRepository.mark_oauth_link_sent(phone)
     UserRepository.set_onboarding_state(phone, STATE_OAUTH_PENDING)
 
@@ -90,7 +111,7 @@ def _handle_location_result(phone: str, user: dict, raw_city: str, result) -> No
             timezone=result.timezone,
         )
         updated = UserRepository.get_user(phone) or user
-        _send_oauth_link(phone, updated)
+        _ask_provider(phone, updated)
         return
 
     if result.status == STATUS_NOT_FOUND:
@@ -115,7 +136,7 @@ def _handle_location_result(phone: str, user: dict, raw_city: str, result) -> No
         "timezone": "UTC",
     })
     updated = UserRepository.get_user(phone) or user
-    _send_oauth_link(phone, updated)
+    _ask_provider(phone, updated)
 
 
 async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bool:
@@ -188,16 +209,27 @@ async def handle_onboarding(inbound: InboundMessage, user: Optional[dict]) -> bo
         _handle_location_result(phone, user, text, result)
         return True
 
+    if state == STATE_PROVIDER_PENDING:
+        provider = detect_provider(text)
+        if provider is None:
+            lang = (user.get("language") or "en").lower()
+            send_whatsapp_message(phone, onboarding_copy.get("provider_retry", lang))
+            return True
+        _send_oauth_link(phone, user, provider)
+        return True
+
     if state == STATE_OAUTH_PENDING:
         lowered = text.lower()
         if any(kw in lowered for kw in _CALENDAR_INTENT_KEYWORDS):
+            provider = user.get("oauth_pending_provider") or "google"
             state_token = user.get("google_oauth_state_token")
             if not state_token:
                 state_token = secrets.token_urlsafe(32)
                 UserRepository.set_oauth_state_token(
-                    phone, state_token, datetime.utcnow() + timedelta(hours=1)
+                    phone, state_token, datetime.utcnow() + timedelta(hours=1),
+                    provider=provider, slot="primary",
                 )
-            link = _build_authorize_url(state_token)
+            link = _build_authorize_url(state_token, provider)
             lang = (user.get("language") or "en").lower()
             send_whatsapp_message(
                 phone, onboarding_copy.get("oauth_pending_calendar_query", lang, link=link)

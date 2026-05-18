@@ -161,18 +161,14 @@ def _finalize_expense(phone, pending, user, lang):
 def _finalize_calendar(phone, pending, user, lang):
     from app.models.agent_result import AgentResult
     from app.responder.response_formatter import format_response
-    from app.services.google_calendar import create_event_for_user
-    from app.services.token_crypto import decrypt
+    from app.services.calendar_accounts import (
+        iter_calendar_accounts,
+        create_event_on_primary,
+    )
+    from app.services.google_calendar import CalendarTokenInvalid
+    from app.services.calendar_reconnect import handle_token_invalid
 
-    encrypted = user.get("google_calendar_refresh_token")
-    if not encrypted:
-        send_whatsapp_message(phone, _NOT_CONNECTED.get(lang, _NOT_CONNECTED["es"]))
-        return
-
-    try:
-        refresh_token = decrypt(encrypted)
-    except Exception as exc:
-        logger.exception("Token decrypt failed for %s: %s", phone, exc)
+    if not iter_calendar_accounts(user):
         send_whatsapp_message(phone, _NOT_CONNECTED.get(lang, _NOT_CONNECTED["es"]))
         return
 
@@ -196,8 +192,8 @@ def _finalize_calendar(phone, pending, user, lang):
         end_dt = start_dt + timedelta(minutes=60)
         tz_str = user.get("timezone") or "UTC"
 
-        event = create_event_for_user(
-            refresh_token,
+        event = create_event_on_primary(
+            user,
             title=event_title,
             start_iso=start_dt.isoformat(),
             end_iso=end_dt.isoformat(),
@@ -223,6 +219,9 @@ def _finalize_calendar(phone, pending, user, lang):
         follow_up = "¿Quieres más detalles? 🐙" if lang == "es" else "Want more details? 🐙"
         send_whatsapp_message(phone, follow_up)
 
+    except CalendarTokenInvalid as exc:
+        logger.warning("Calendar token invalid for %s on type-clarify create: %s", phone, exc)
+        handle_token_invalid(phone, lang, getattr(exc, "provider", "google"))
     except Exception as exc:
         logger.exception("Type-clarify calendar create failed for %s: %s", phone, exc)
         send_whatsapp_message(phone, _CREATE_ERROR.get(lang, _CREATE_ERROR["es"]))

@@ -81,7 +81,7 @@ def test_send_called_with_phone_and_message(mock_compose, mock_build, mock_send)
        return_value=(None, None))
 @patch("app.services.morning_brief.morning_brief_composer.get_weather_for_today",
        return_value={"summary": "Sunny", "temperature": "28°C"})
-@patch("app.services.morning_brief.morning_brief_composer.get_today_events_for_user",
+@patch("app.services.morning_brief.morning_brief_composer.get_today_events_merged",
        return_value=[])
 def test_composer_uses_user_location_for_weather(mock_events, mock_weather, mock_travel, mock_rain):
     user = _user(location="Cartagena, Colombia", lang="es")
@@ -95,7 +95,7 @@ def test_composer_uses_user_location_for_weather(mock_events, mock_weather, mock
        return_value=(None, None))
 @patch("app.services.morning_brief.morning_brief_composer.get_weather_for_today",
        return_value={"summary": "Rainy", "temperature": "15°C"})
-@patch("app.services.morning_brief.morning_brief_composer.get_today_events_for_user",
+@patch("app.services.morning_brief.morning_brief_composer.get_today_events_merged",
        return_value=[])
 def test_composer_passes_language_to_weather(mock_events, mock_weather, mock_travel, mock_rain):
     user = _user(location="Buenos Aires, Argentina", lang="en")
@@ -109,7 +109,7 @@ def test_composer_passes_language_to_weather(mock_events, mock_weather, mock_tra
        return_value=(None, None))
 @patch("app.services.morning_brief.morning_brief_composer.get_weather_for_today",
        return_value={"summary": "Partly cloudy", "temperature": "22°C"})
-@patch("app.services.morning_brief.morning_brief_composer.get_today_events_for_user",
+@patch("app.services.morning_brief.morning_brief_composer.get_today_events_merged",
        return_value=[])
 def test_composer_merges_rain_probability_into_weather(mock_events, mock_weather, mock_travel, mock_rain):
     data = compose_morning_insights(_user())

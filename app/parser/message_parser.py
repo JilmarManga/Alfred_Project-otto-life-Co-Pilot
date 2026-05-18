@@ -158,6 +158,26 @@ deleting a user-defined list of items (links, names, notes, anything):
 - list_label: an optional short label the user attached to this specific item.
   null if no label is mentioned.
 
+Google Drive operations — fill these fields ONLY when the user is asking to
+find, read, analyze, or modify a file/document/spreadsheet in their Drive:
+- drive_intent: "find" (locate a file), "read" (show its content), "analyze"
+  (summarize / answer a question about it), "modify" (change its content);
+  null otherwise.
+- drive_file_ref: the file's name exactly as the user referred to it,
+  preserving original case and wording. Do not translate or paraphrase. null
+  if no file name is mentioned.
+- drive_edit: ONLY when drive_intent is "modify". A structured object describing
+  the EXACT change the user explicitly asked for. Never invent content. Shapes:
+  * Spreadsheet cell:
+    {"op":"set_cell","locator_column":<header the user matches on>,
+     "locator_value":<value to find in that column>,
+     "target_column":<header to change>,"new_value":<new value>}
+  * Replace exact text in a doc/text file:
+    {"op":"replace_text","find":<exact text the user quoted>,"replace":<new text>}
+  * Append text to a doc/text file:
+    {"op":"append_text","text":<text to add>}
+  Use null for drive_edit unless the user gave an explicit, unambiguous change.
+
 DO NOT fill event fields when the user is asking a question about existing events
 ("tengo reunión?", "do I have a meeting?", "cuál es mi próximo evento?", "¿qué tengo hoy?").
 DO NOT fill event fields when the user references events vaguely ("next event",
@@ -172,6 +192,8 @@ Output format:
   "event_location": <string or null>, "event_duration_minutes": <integer or null>,
   "list_intent": <"save"|"recall"|"delete"|null>, "list_name": <string or null>,
   "list_item": <string or null>, "list_label": <string or null>,
+  "drive_intent": <"find"|"read"|"analyze"|"modify"|null>,
+  "drive_file_ref": <string or null>, "drive_edit": <object or null>,
   "raw_message": <original message> }"""
 
 
@@ -304,6 +326,12 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
         list_item = data.get("list_item")
         list_label = data.get("list_label")
 
+        raw_drive_intent = data.get("drive_intent")
+        drive_intent = raw_drive_intent if raw_drive_intent in {"find", "read", "analyze", "modify"} else None
+        drive_file_ref = data.get("drive_file_ref")
+        raw_drive_edit = data.get("drive_edit")
+        drive_edit = raw_drive_edit if isinstance(raw_drive_edit, dict) else None
+
         return ParsedMessage(
             amount=amount,
             currency=currency,
@@ -320,6 +348,9 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             list_name=list_name,
             list_item=list_item,
             list_label=list_label,
+            drive_intent=drive_intent,
+            drive_file_ref=drive_file_ref,
+            drive_edit=drive_edit,
         )
 
     except Exception as e:

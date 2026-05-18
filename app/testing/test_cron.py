@@ -131,10 +131,9 @@ def _make_user(phone="+573001234567", tz="America/Bogota", token="enc-tok"):
 
 @patch("app.api.cron_routes.UserRepository.mark_morning_brief_sent")
 @patch("app.api.cron_routes.run_morning_briefing", return_value=True)
-@patch("app.api.cron_routes.decrypt", return_value="plain-tok")
 @patch("app.api.cron_routes._is_morning_brief_window", return_value=True)
 @patch("app.api.cron_routes.UserRepository.list_users_for_morning_brief")
-def test_marks_sent_when_delivery_succeeds(mock_list, mock_window, mock_decrypt,
+def test_marks_sent_when_delivery_succeeds(mock_list, mock_window,
                                            mock_brief, mock_mark):
     mock_list.return_value = [_make_user()]
     count = _run_morning_briefs()
@@ -144,10 +143,9 @@ def test_marks_sent_when_delivery_succeeds(mock_list, mock_window, mock_decrypt,
 
 @patch("app.api.cron_routes.UserRepository.mark_morning_brief_sent")
 @patch("app.api.cron_routes.run_morning_briefing", return_value=False)
-@patch("app.api.cron_routes.decrypt", return_value="plain-tok")
 @patch("app.api.cron_routes._is_morning_brief_window", return_value=True)
 @patch("app.api.cron_routes.UserRepository.list_users_for_morning_brief")
-def test_does_not_mark_sent_when_whatsapp_rejects(mock_list, mock_window, mock_decrypt,
+def test_does_not_mark_sent_when_whatsapp_rejects(mock_list, mock_window,
                                                   mock_brief, mock_mark):
     mock_list.return_value = [_make_user()]
     count = _run_morning_briefs()
@@ -157,10 +155,9 @@ def test_does_not_mark_sent_when_whatsapp_rejects(mock_list, mock_window, mock_d
 
 @patch("app.api.cron_routes.UserRepository.mark_morning_brief_sent")
 @patch("app.api.cron_routes.run_morning_briefing", side_effect=Exception("calendar down"))
-@patch("app.api.cron_routes.decrypt", return_value="plain-tok")
 @patch("app.api.cron_routes._is_morning_brief_window", return_value=True)
 @patch("app.api.cron_routes.UserRepository.list_users_for_morning_brief")
-def test_does_not_mark_sent_on_exception(mock_list, mock_window, mock_decrypt,
+def test_does_not_mark_sent_on_exception(mock_list, mock_window,
                                          mock_brief, mock_mark):
     mock_list.return_value = [_make_user()]
     count = _run_morning_briefs()
@@ -170,10 +167,9 @@ def test_does_not_mark_sent_on_exception(mock_list, mock_window, mock_decrypt,
 
 @patch("app.api.cron_routes.UserRepository.mark_morning_brief_sent")
 @patch("app.api.cron_routes.run_morning_briefing", return_value=True)
-@patch("app.api.cron_routes.decrypt", return_value="plain-tok")
 @patch("app.api.cron_routes._is_morning_brief_window", return_value=False)
 @patch("app.api.cron_routes.UserRepository.list_users_for_morning_brief")
-def test_skips_user_outside_window(mock_list, mock_window, mock_decrypt,
+def test_skips_user_outside_window(mock_list, mock_window,
                                    mock_brief, mock_mark):
     mock_list.return_value = [_make_user()]
     count = _run_morning_briefs()
@@ -184,10 +180,9 @@ def test_skips_user_outside_window(mock_list, mock_window, mock_decrypt,
 
 @patch("app.api.cron_routes.UserRepository.mark_morning_brief_sent")
 @patch("app.api.cron_routes.run_morning_briefing", return_value=True)
-@patch("app.api.cron_routes.decrypt", return_value="plain-tok")
 @patch("app.api.cron_routes._is_morning_brief_window", return_value=True)
 @patch("app.api.cron_routes.UserRepository.list_users_for_morning_brief")
-def test_skips_user_already_sent_today(mock_list, mock_window, mock_decrypt,
+def test_skips_user_already_sent_today(mock_list, mock_window,
                                        mock_brief, mock_mark):
     user = _make_user()
     # Patch datetime.now to return today matching the stored date
@@ -232,10 +227,9 @@ def _make_event(event_id="evt1", minutes_from_now=60):
 
 @patch("app.api.cron_routes.UserRepository.add_notified_event")
 @patch("app.api.cron_routes.send_whatsapp_message", return_value=True)
-@patch("app.api.cron_routes.get_upcoming_events_window")
-@patch("app.api.cron_routes.decrypt", return_value="plain")
+@patch("app.api.cron_routes.get_upcoming_events_window_merged")
 @patch("app.api.cron_routes.UserRepository.list_users_for_reminders")
-def test_event_reminder_sends_and_records(mock_list, mock_decrypt, mock_calendar,
+def test_event_reminder_sends_and_records(mock_list, mock_calendar,
                                           mock_send, mock_add):
     mock_list.return_value = [_make_reminder_user()]
     mock_calendar.return_value = [_make_event()]
@@ -247,11 +241,10 @@ def test_event_reminder_sends_and_records(mock_list, mock_decrypt, mock_calendar
 
 @patch("app.api.cron_routes.UserRepository.add_notified_event")
 @patch("app.api.cron_routes.send_whatsapp_message", return_value=True)
-@patch("app.api.cron_routes.get_upcoming_events_window")
-@patch("app.api.cron_routes.decrypt", return_value="plain")
+@patch("app.api.cron_routes.get_upcoming_events_window_merged")
 @patch("app.api.cron_routes.UserRepository.list_users_for_reminders")
-def test_event_reminder_deduped_if_already_notified(mock_list, mock_decrypt,
-                                                    mock_calendar, mock_send, mock_add):
+def test_event_reminder_deduped_if_already_notified(mock_list, mock_calendar,
+                                                    mock_send, mock_add):
     event = _make_event()
     start_dt = datetime.fromisoformat(event["start"]["dateTime"])
     dedup_key = f"evt1:{start_dt.astimezone(ZoneInfo('America/Bogota')).date().isoformat()}"
@@ -265,10 +258,9 @@ def test_event_reminder_deduped_if_already_notified(mock_list, mock_decrypt,
 
 @patch("app.api.cron_routes.UserRepository.add_notified_event")
 @patch("app.api.cron_routes.send_whatsapp_message", return_value=True)
-@patch("app.api.cron_routes.get_upcoming_events_window")
-@patch("app.api.cron_routes.decrypt", return_value="plain")
+@patch("app.api.cron_routes.get_upcoming_events_window_merged")
 @patch("app.api.cron_routes.UserRepository.list_users_for_reminders")
-def test_event_reminder_skips_all_day_event(mock_list, mock_decrypt, mock_calendar,
+def test_event_reminder_skips_all_day_event(mock_list, mock_calendar,
                                             mock_send, mock_add):
     all_day = {"id": "evt_ad", "summary": "Birthday", "start": {"date": "2026-04-29"}}
     mock_list.return_value = [_make_reminder_user()]

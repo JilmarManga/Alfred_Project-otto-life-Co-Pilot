@@ -1,4 +1,5 @@
-from app.services.google_calendar import get_today_events_for_user, normalize_events
+from app.services.google_calendar import normalize_events
+from app.services.calendar_accounts import get_today_events_merged
 from app.services.maps.maps_service import estimate_travel_info
 from app.models.morning_brief import MorningBriefData
 from app.services.weather.weather_service import get_weather_for_today, get_rain_forecast
@@ -8,14 +9,17 @@ def compose_morning_insights(user: dict) -> MorningBriefData:
     """
     Returns structured data for the morning brief.
     Calendar + dynamic weather + travel info for first event.
-    Requires the full user dict (needs refresh_token, location, language).
+    Requires the full user dict (connected_accounts, location, language).
     """
-    refresh_token = user.get("_refresh_token")
     user_location = user.get("location", "Bogotá, Colombia")
     lang = (user.get("language") or "es").lower()
 
-    # 1. Get events via per-user token
-    raw_events = get_today_events_for_user(refresh_token) if refresh_token else []
+    # 1. Get events merged across all connected calendar accounts. Non-strict
+    #    so a single dead/secondary token never kills the morning brief.
+    try:
+        raw_events = get_today_events_merged(user, strict_primary=False)
+    except ValueError:
+        raw_events = []  # calendar_not_connected — brief still has weather
 
     # 2. Normalize
     normalized_events = normalize_events(raw_events) if raw_events else []

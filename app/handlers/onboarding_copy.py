@@ -57,10 +57,18 @@ Cada mañana te envío un resumen: tu calendario, el clima y cuánto tardarás e
         "en": "There are a few places called \"{city}\" — which country?",
         "es": "Hay varios lugares llamados \"{city}\" — ¿en qué país?",
     },
+    "provider_prompt": {
+        "en": "Last step, {name} 👇\n\nWhere do you keep your calendar — *Gmail* or *Outlook*?\nJust reply with one.",
+        "es": "Último paso, {name} 👇\n\n¿Dónde tienes tu calendario — *Gmail* u *Outlook*?\nResponde con una.",
+    },
+    "provider_retry": {
+        "en": "Just reply *Gmail* or *Outlook* so I send you the right link 🙂",
+        "es": "Responde *Gmail* u *Outlook* para enviarte el enlace correcto 🙂",
+    },
     "oauth_link": {
         "en": """Good to meet you, {name} 🤝
 
-To send your morning briefing I need access to your Google Calendar — so I know what your day looks like before you do.
+To send your morning briefing I need access to your {provider_name} calendar — so I know what your day looks like before you do.
 
 Connect it here 👇
 {link}
@@ -68,7 +76,7 @@ Connect it here 👇
 Takes 30 seconds. I only read your calendar — I never modify your events.""",
         "es": """Mucho gusto, {name} 🤝
 
-Para enviarte tu resumen matutino necesito acceso a tu Google Calendar — así sé cómo será tu día antes que tú.
+Para enviarte tu resumen matutino necesito acceso a tu calendario de {provider_name} — así sé cómo será tu día antes que tú.
 
 Conéctalo aquí 👇
 {link}

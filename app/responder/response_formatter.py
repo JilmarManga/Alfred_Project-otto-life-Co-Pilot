@@ -77,6 +77,13 @@ AmbiguityAgent:
 - Examples: "Hola! ¿En qué te puedo ayudar? 🐙" / "Hey! What can I help you with? 🐙"
 - Never respond with just an emoji.
 
+DriveAgent:
+- Only type "drive_analyze" reaches you. The data has [file_name], [question] (what the user asked), and [content] (the file's text).
+- Answer the user's [question] about [file_name] using ONLY [content]. Be concise and conversational — a short paragraph or a few bullet lines, WhatsApp-style.
+- Never invent facts that aren't in [content]. If [content] doesn't answer it, say so plainly and briefly.
+- Do not echo the raw file content back wholesale. Summarize or extract what was asked.
+- Never use curly-brace variables — only square-bracket placeholders.
+
 You will receive a structured result from the assistant's internal system.
 Turn it into a warm, human WhatsApp message. No preamble. Respond in {lang_name} ONLY."""
 
@@ -113,6 +120,7 @@ _ERROR_MESSAGES = {
     "WeatherAgent":  {"es": "No pude obtener el clima. Intenta de nuevo 🙏", "en": "Couldn't get the weather. Try again 🙏"},
     "GreetingAgent": {"es": "¡Hola! 🐙", "en": "Hey! 🐙"},
     "ListAgent":     {"es": "No pude procesar tu lista. Intenta de nuevo 🙏", "en": "Couldn't process your list. Try again 🙏"},
+    "DriveAgent":    {"es": "No pude acceder a ese archivo. Intenta de nuevo 🙏", "en": "Couldn't access that file. Try again 🙏"},
 }
 
 # Error codes that beat the generic agent-level error message above.
@@ -170,6 +178,52 @@ _SPECIFIC_ERRORS = {
         "es": "No entendí qué quieres guardar 🤔 Mándamelo otra vez.",
         "en": "I couldn't tell what to save 🤔 Send it again?",
     },
+    # DriveAgent — safe, human-friendly copy. Edit-resolution codes never apply
+    # a change; they explain why and ask for a clearer instruction.
+    "drive_not_connected": {
+        "es": "Primero conecta tu Google Drive y volvemos a esto 🙂",
+        "en": "Connect your Google Drive first and we'll pick this back up 🙂",
+    },
+    "missing_file_ref": {
+        "es": "¿Cuál archivo? Dime el nombre y lo busco 📁",
+        "en": "Which file? Tell me its name and I'll find it 📁",
+    },
+    "file_not_found": {
+        "es": "No encontré un archivo con ese nombre en tu Drive 🔎",
+        "en": "I couldn't find a file with that name in your Drive 🔎",
+    },
+    "unsupported_file_type": {
+        "es": "Ese tipo de archivo todavía no lo puedo leer 🙂 Funciona con Documentos, Hojas de cálculo y texto.",
+        "en": "I can't read that file type yet 🙂 I work with Docs, Sheets and text files.",
+    },
+    "edit_unsupported_for_type": {
+        "es": "Ese cambio no aplica a este tipo de archivo 🙂",
+        "en": "That kind of change doesn't apply to this file type 🙂",
+    },
+    "invalid_edit_spec": {
+        "es": "No me quedó claro el cambio exacto 🤔 Dime qué valor cambiar y a qué.",
+        "en": "I didn't get the exact change 🤔 Tell me which value to change and to what.",
+    },
+    "edit_no_match": {
+        "es": "No encontré eso en el archivo, así que no cambié nada 🙂 Revisa el nombre/valor y dime de nuevo.",
+        "en": "I couldn't find that in the file, so I changed nothing 🙂 Double-check the name/value and tell me again.",
+    },
+    "edit_multiple_matches": {
+        "es": "Eso aparece varias veces, así que no cambié nada por seguridad 🙂 Sé más específico para que cambie solo el correcto.",
+        "en": "That appears more than once, so I changed nothing to be safe 🙂 Be more specific so I edit only the right one.",
+    },
+    "edit_column_not_found": {
+        "es": "No encontré esa columna en la hoja 🤔 Revisa el nombre del encabezado.",
+        "en": "I couldn't find that column in the sheet 🤔 Check the header name.",
+    },
+    "edit_no_headers": {
+        "es": "Esa hoja no parece tener encabezados, así que no cambié nada 🙂",
+        "en": "That sheet doesn't seem to have headers, so I changed nothing 🙂",
+    },
+    "modify_failed": {
+        "es": "No pude aplicar el cambio. No modifiqué nada — intenta de nuevo 🙏",
+        "en": "I couldn't apply the change. Nothing was modified — try again 🙏",
+    },
 }
 
 # Per-type success fallbacks used when the LLM formatting call fails for a
@@ -180,6 +234,10 @@ _TYPE_FALLBACKS = {
     "travel_leave_plan": {
         "es": "Te digo cuándo salir 🚗 ¿Quieres que te avise?",
         "en": "I'll tell you when to leave 🚗 Want me to remind you?",
+    },
+    "drive_analyze": {
+        "es": "Revisé el archivo, pero no pude resumirlo ahora 🙏 Intenta de nuevo.",
+        "en": "I went through the file but couldn't summarize it just now 🙏 Try again.",
     },
 }
 
@@ -309,6 +367,57 @@ _DISAMBIG_ACTION_COPY = {
     "WeatherAgent":  {"es": "consultar el clima",         "en": "check the weather"},
     "SummaryAgent":  {"es": "darte un resumen de gastos", "en": "get you an expense summary"},
 }
+
+# ---- DriveAgent hardcoded copy ------------------------------------------- #
+# All deterministic (no LLM) except drive_analyze, which is the one sanctioned
+# Layer-4 LLM path. .format() placeholders are safe here (not sent to the LLM).
+
+_DRIVE_FILE_CHOICE_COPY = {
+    "es": "Encontré varios archivos para “{name}”. ¿Cuál?\n{options}",
+    "en": "I found several files for “{name}”. Which one?\n{options}",
+}
+
+_DRIVE_FIND_COPY = {
+    "es": "Encontré estos archivos 📁\n{options}",
+    "en": "I found these files 📁\n{options}",
+}
+
+_DRIVE_READ_COPY = {
+    "es": "📄 {file_name}\n\n{content}",
+    "en": "📄 {file_name}\n\n{content}",
+}
+
+# The modify preview — the explicit authorization prompt. Deterministic by
+# design: the user must see EXACTLY what will change before approving.
+_DRIVE_PREVIEW_CELL_COPY = {
+    "es": "Voy a cambiar en *{file_name}* ({location}):\n“{old_value}” → “{new_value}”\n\n¿Confirmo? Responde *sí* para aplicarlo.",
+    "en": "I'll change in *{file_name}* ({location}):\n“{old_value}” → “{new_value}”\n\nConfirm? Reply *yes* to apply it.",
+}
+_DRIVE_PREVIEW_REPLACE_COPY = {
+    "es": "Voy a reemplazar en *{file_name}*:\n“{old_value}” → “{new_value}”\n\n¿Confirmo? Responde *sí* para aplicarlo.",
+    "en": "I'll replace in *{file_name}*:\n“{old_value}” → “{new_value}”\n\nConfirm? Reply *yes* to apply it.",
+}
+_DRIVE_PREVIEW_APPEND_COPY = {
+    "es": "Voy a agregar al final de *{file_name}*:\n“{new_value}”\n\n¿Confirmo? Responde *sí* para aplicarlo.",
+    "en": "I'll append to *{file_name}*:\n“{new_value}”\n\nConfirm? Reply *yes* to apply it.",
+}
+
+_DRIVE_APPLIED_COPY = {
+    "es": "Listo ✅ Actualicé *{file_name}*.",
+    "en": "Done ✅ I updated *{file_name}*.",
+}
+_DRIVE_REVISION_CONFLICT_COPY = {
+    "es": "*{file_name}* cambió desde que te mostré la vista previa, así que no apliqué nada por seguridad 🙂 Pídemelo de nuevo y reviso el estado actual.",
+    "en": "*{file_name}* changed since I showed you the preview, so I didn't apply anything to be safe 🙂 Ask me again and I'll re-check the current state.",
+}
+
+
+def _render_drive_options(items: list) -> str:
+    lines = []
+    for i, it in enumerate(items):
+        lines.append(f"{i + 1}. {it.get('name') or it.get('file_name') or ''}")
+    return "\n".join(lines)
+
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -528,6 +637,50 @@ def format_response(result: AgentResult, user: dict) -> str:
             return _render_list_recall(data, lang)
         if data_type == "list_disambiguation":
             return _render_list_disambiguation(data.get("candidates") or [], lang)
+
+    # DriveAgent — deterministic branches. The agent already DM'd the user for
+    # connect-link / dead-token cases, so those return "" (webhook drops it).
+    if agent == "DriveAgent" and result.success:
+        if data_type in ("drive_connect_link_sent", "drive_token_invalid_handled"):
+            return ""
+        if data_type == "drive_file_choice":
+            return _DRIVE_FILE_CHOICE_COPY.get(lang, _DRIVE_FILE_CHOICE_COPY["es"]).format(
+                name=data.get("requested_name") or "",
+                options=_render_drive_options(data.get("candidates") or []),
+            )
+        if data_type == "drive_find":
+            return _DRIVE_FIND_COPY.get(lang, _DRIVE_FIND_COPY["es"]).format(
+                options=_render_drive_options(data.get("files") or []),
+            )
+        if data_type == "drive_read":
+            return _DRIVE_READ_COPY.get(lang, _DRIVE_READ_COPY["es"]).format(
+                file_name=data.get("file_name") or "",
+                content=data.get("content") or "",
+            )
+        if data_type == "drive_modify_preview":
+            kind = data.get("change_kind")
+            if kind == "cell":
+                tmpl = _DRIVE_PREVIEW_CELL_COPY
+            elif kind == "append":
+                tmpl = _DRIVE_PREVIEW_APPEND_COPY
+            else:
+                tmpl = _DRIVE_PREVIEW_REPLACE_COPY
+            return tmpl.get(lang, tmpl["es"]).format(
+                file_name=data.get("file_name") or "",
+                location=data.get("location") or "",
+                old_value=data.get("old_value") or "",
+                new_value=data.get("new_value") or "",
+            )
+        if data_type == "drive_modify_applied":
+            return _DRIVE_APPLIED_COPY.get(lang, _DRIVE_APPLIED_COPY["es"]).format(
+                file_name=data.get("file_name") or "",
+            )
+        if data_type == "drive_modify_revision_conflict":
+            return _DRIVE_REVISION_CONFLICT_COPY.get(
+                lang, _DRIVE_REVISION_CONFLICT_COPY["es"],
+            ).format(file_name=data.get("file_name") or "")
+        # drive_analyze falls through to the LLM path below (the one
+        # sanctioned analysis call — see FORMATTING_PROMPT DriveAgent).
 
     # Special case: expense needs a currency answer — not a real error.
     if agent == "ExpenseAgent" and data.get("needs_currency"):

@@ -11,6 +11,7 @@ from app.agents.ambiguity_agent import AmbiguityAgent
 from app.agents.greeting_agent import GreetingAgent
 from app.agents.type_clarify_agent import TypeClarifyAgent
 from app.agents.list_agent import ListAgent
+from app.agents.drive_agent import DriveAgent
 from app.router.route_decision import Disambiguation, RouteDecision
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
@@ -142,6 +143,7 @@ def route(parsed: ParsedMessage, *, skip_list: bool = False) -> RouteDecision:
       8.  event_reference present                  → CalendarAgent    (ordinal/next follow-ups with no keyword)
       9.  greeting keyword                         → GreetingAgent
       10. gratitude keyword                        → GreetingAgent
+      10.5 DriveAgent.matches (noun+action)        → DriveAgent (no disambiguation)
       11. fallback                                 → AmbiguityAgent
 
     `skip_list`: reserved for the Gate-5 awaiting_disambiguation branch.
@@ -172,5 +174,14 @@ def route(parsed: ParsedMessage, *, skip_list: bool = False) -> RouteDecision:
                 candidates=["ListAgent", keyword_agent.__class__.__name__],
             ),
         )
+
+    # DriveAgent uses a pattern predicate like ListAgent, but its match is
+    # intentionally narrow (a Drive noun AND a Drive action, or an
+    # LLM-extracted drive_intent). That specificity is strong enough to win
+    # the generic keyword chain outright with no disambiguation — keeping the
+    # existing disambiguation gate completely unchanged. Checked after the
+    # list block so an explicit list op still wins if both somehow trip.
+    if DriveAgent.matches(parsed):
+        return RouteDecision(agent=DriveAgent())
 
     return RouteDecision(agent=keyword_agent or AmbiguityAgent())
