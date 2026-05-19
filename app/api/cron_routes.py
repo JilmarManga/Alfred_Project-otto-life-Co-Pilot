@@ -204,22 +204,94 @@ def _run_departure_reminders() -> int:
     return sent
 
 
+_USER_REMINDER_COPY = {
+    "es": "🔔 Recordatorio: {text}",
+    "en": "🔔 Reminder: {text}",
+}
+_USER_REMINDER_FOLLOWUP_COPY = {
+    "es": "¿Quieres que te lo recuerde otra vez a otra hora? ¿En una hora? ¿O lo borro?",
+    "en": "Want me to remind you again at another time? In an hour? Or delete it?",
+}
+
+
+def _run_user_reminders() -> int:
+    """
+    Deliver due personal reminders (ReminderAgent), then send the post-delivery
+    follow-up question and flip the doc to awaiting_followup. Returns the count
+    delivered. Fully isolated from _run_departure_reminders / scheduled_reminders.
+    """
+    from app.repositories.user_reminder_repository import UserReminderRepository
+
+    now = datetime.now(timezone.utc)
+    due = UserReminderRepository.list_due_scheduled(now, horizon_minutes=15)
+    sent = 0
+
+    for r in due:
+        phone = r.get("user_phone_number")
+        doc_id = r.get("id")
+        if not phone or not doc_id:
+            continue
+        lang = (r.get("lang") or "es").lower()
+        text = r.get("reminder_text") or ""
+        try:
+            send_whatsapp_message(
+                phone,
+                _USER_REMINDER_COPY.get(lang, _USER_REMINDER_COPY["en"]).format(text=text),
+            )
+            send_whatsapp_message(
+                phone,
+                _USER_REMINDER_FOLLOWUP_COPY.get(lang, _USER_REMINDER_FOLLOWUP_COPY["en"]),
+            )
+            UserReminderRepository.mark_awaiting_followup(doc_id, now.isoformat())
+            sent += 1
+        except Exception as exc:
+            logger.exception("User reminder send failed for %s/%s: %s", phone, doc_id, exc)
+
+    return sent
+
+
+def _sweep_stale_reminder_followups() -> int:
+    """
+    Delete awaiting_followup reminders older than 10 min (no-response → delete).
+    Returns the count swept.
+    """
+    from app.repositories.user_reminder_repository import UserReminderRepository
+
+    now = datetime.now(timezone.utc)
+    stale = UserReminderRepository.list_stale_awaiting_followup(now, max_age_minutes=10)
+    swept = 0
+    for r in stale:
+        doc_id = r.get("id")
+        if not doc_id:
+            continue
+        try:
+            UserReminderRepository.delete(doc_id)
+            swept += 1
+        except Exception as exc:
+            logger.exception("Stale reminder sweep failed for %s: %s", doc_id, exc)
+    return swept
+
+
 def run_cron_job() -> dict:
     """
     Core cron logic — called by the internal scheduler every 15 min,
-    and also by the HTTP route for manual triggers. Does five things:
+    and also by the HTTP route for manual triggers. Does seven things:
       1. Sends the 3h OAuth reminder to users who haven't connected yet,
          minting a fresh state token so the link is actually clickable.
       2. Retries location resolution for users whose geocoding failed during onboarding.
       3. Sends 1-hour reminders for upcoming calendar events.
       4. Sends the morning brief to users whose local time is 6:00–6:29.
       5. Delivers one-off departure reminders scheduled by TravelAgent.
+      6. Delivers personal reminders (ReminderAgent) + the post-delivery follow-up.
+      7. Sweeps stale personal-reminder follow-ups (10-min no-response → delete).
     """
     followups_sent = 0
     locations_resolved = 0
     reminders_sent = 0
     morning_briefs_sent = 0
     departure_reminders_sent = 0
+    user_reminders_sent = 0
+    stale_followups_swept = 0
 
     # --- 1. OAuth follow-ups ---
     for user in UserRepository.list_pending_oauth_followups():
@@ -282,10 +354,24 @@ def run_cron_job() -> dict:
     except Exception as exc:
         logger.exception("Departure reminders run failed: %s", exc)
 
+    # --- 6. Personal reminders (ReminderAgent) ---
+    try:
+        user_reminders_sent = _run_user_reminders()
+    except Exception as exc:
+        logger.exception("User reminders run failed: %s", exc)
+
+    # --- 7. Stale personal-reminder follow-up sweep (10-min window) ---
+    try:
+        stale_followups_swept = _sweep_stale_reminder_followups()
+    except Exception as exc:
+        logger.exception("Stale reminder sweep failed: %s", exc)
+
     logger.info(
         "Cron job complete — followups_sent=%d locations_resolved=%d reminders_sent=%d "
-        "morning_briefs_sent=%d departure_reminders_sent=%d",
-        followups_sent, locations_resolved, reminders_sent, morning_briefs_sent, departure_reminders_sent,
+        "morning_briefs_sent=%d departure_reminders_sent=%d user_reminders_sent=%d "
+        "stale_followups_swept=%d",
+        followups_sent, locations_resolved, reminders_sent, morning_briefs_sent,
+        departure_reminders_sent, user_reminders_sent, stale_followups_swept,
     )
     return {
         "status": "ok",
@@ -294,6 +380,8 @@ def run_cron_job() -> dict:
         "reminders_sent": reminders_sent,
         "morning_briefs_sent": morning_briefs_sent,
         "departure_reminders_sent": departure_reminders_sent,
+        "user_reminders_sent": user_reminders_sent,
+        "stale_followups_swept": stale_followups_swept,
     }
 
 

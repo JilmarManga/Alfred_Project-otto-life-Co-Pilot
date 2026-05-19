@@ -12,6 +12,7 @@ from app.agents.greeting_agent import GreetingAgent
 from app.agents.type_clarify_agent import TypeClarifyAgent
 from app.agents.list_agent import ListAgent
 from app.agents.drive_agent import DriveAgent
+from app.agents.reminder_agent import ReminderAgent
 from app.router.route_decision import Disambiguation, RouteDecision
 
 # Keyword sets mirror parser/message_parser.py — kept here for routing logic
@@ -162,6 +163,18 @@ def route(parsed: ParsedMessage, *, skip_list: bool = False) -> RouteDecision:
         return RouteDecision(agent=CalendarAgent())
 
     keyword_agent = _pick_keyword_agent(parsed, signals)
+
+    # Priority 0.4 — personal reminders. Pattern predicate like ListAgent /
+    # DriveAgent. Must NOT preempt the amount/expense or small-int
+    # TypeClarify paths: a number was extracted → almost certainly money, not
+    # a reminder. The ambiguous reminder-vs-calendar-event case still routes
+    # here; ReminderAgent stages its OWN clarify gate (never the router-level
+    # Disambiguation, which is coupled to ListAgent).
+    if ReminderAgent.matches(parsed) and not isinstance(
+        keyword_agent, (ExpenseAgent, TypeClarifyAgent)
+    ):
+        return RouteDecision(agent=ReminderAgent())
+
     list_match = (not skip_list) and ListAgent.matches(parsed)
 
     if list_match:

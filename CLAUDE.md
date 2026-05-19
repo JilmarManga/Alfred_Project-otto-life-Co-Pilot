@@ -35,6 +35,7 @@ WhatsApp POST /webhook
   -> handle_pending_travel()                 [handlers/pending_travel_handler.py]   ← location + reminder gate
   -> handle_pending_list()                   [handlers/pending_list_handler.py]     ← list choice / delete-confirm / disambig
   -> handle_pending_drive()                  [handlers/pending_drive_handler.py]    ← Drive file-choice / modify-confirm gate
+  -> handle_pending_reminder()               [handlers/pending_reminder_handler.py] ← reminder time-clarify / reminder-vs-event / post-delivery follow-up gate
   -> handle_account_link()                   [handlers/account_link_handler.py]     ← add-2nd-calendar-account flow (provider ask + link)
   -> parse_message()          LAYER 1        [parser/message_parser.py]
   -> route()                  LAYER 2        [router/deterministic_router.py]     ← returns RouteDecision
@@ -159,6 +160,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 | `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan for out-of-scope vs true ambiguity; logs to `unknown_messages` |
 | `ListAgent` | `list_agent/` (package) | Save/recall/delete user-defined named lists; 3-list cap, 10-min dedup, stages delete confirm |
 | `DriveAgent` | `drive_agent/` (package) | Google Drive find/read/analyze + **confirm-before-write** modify (Docs/Sheets/text). LLM never rewrites content — parser extracts a structured edit spec, skill resolves it deterministically, write only after explicit user confirmation + revision guard. **Structured tabular `analyze`** (filter/group/count over a Sheet/.xlsx) is also deterministic: parser emits `drive_query`, `_shared/query_resolver` selects EVERY matching row (no LLM row selection); only prose/free-form analysis stays LLM-driven |
+| `ReminderAgent` | `reminder_agent/` (package) | Personal reminders (set/list/cancel) — **isolated** `user_reminders` collection + own repo + cron passes 6–7. Pure deterministic time resolution (`_shared/time_resolver`): explicit time honored; bare part-of-day → 09:00/15:00/19:00 user-tz; no time-of-day → `pending_reminder` clarify gate. Ambiguous reminder-vs-event → confirms inside the package (never the router Disambiguation). Post-delivery: sends the again/in-an-hour/delete follow-up; reply window is 10 min, durable via `status="awaiting_followup"` (no reply → swept). All Layer 4 copy hardcoded ES/EN (text echoed from parser, no LLM) |
 
 **Key behaviors:**
 - `ExpenseAgent`: category validated against `{"food","transport","shopping","health","other"}`. Non-standard hints fall back to "other" + keyword scan.
@@ -303,6 +305,11 @@ created_at, updated_at
 - Docs are **deleted** after delivery — every doc in the collection is pending by definition. No accumulation.
 - Written by `ScheduleDepartureReminderSkill`. Delivered and deleted by `_run_departure_reminders()` in `cron_routes.py`.
 
+**`user_reminders`** (auto ID): personal reminders (ReminderAgent). **Isolated from `scheduled_reminders`.**
+`user_phone_number, reminder_text, fire_at (ISO tz-aware), lang, tz (IANA snapshot), status, created_at, delivered_at`
+- `status`: `"scheduled"` (waiting) → `"awaiting_followup"` (delivered; 10-min window for the again/in-an-hour/delete reply) → rescheduled back to `scheduled`, or deleted.
+- Written by `SetReminderSkill`; mutated by `RescheduleReminderSkill`/`CancelReminderSkill`. Delivered by `_run_user_reminders()` (cron pass 6); stale `awaiting_followup` (>10 min, no reply) swept by `_sweep_stale_reminder_followups()` (cron pass 7). Never reuses `scheduled_reminders` or `ScheduledReminderRepository`.
+
 **`lists`** (auto ID): user-defined named lists for save/recall.
 ```
 user_phone_number: str        # enforced on every query — no cross-user reads
@@ -348,6 +355,8 @@ app/
 │   ├── drive_agent/             # Agent/Skill package — Drive find/read/analyze/confirmed-modify
 │   │     # _shared/edit_resolver.py  — deterministic modify-spec resolver
 │   │     # _shared/query_resolver.py — deterministic tabular-query resolver (analyze)
+│   ├── reminder_agent/          # Agent/Skill package — personal reminders (isolated)
+│   │     # _shared/time_resolver.py — pure tz/period→fire_at resolver
 │   ├── summary_agent.py
 │   ├── weather_agent.py
 │   ├── greeting_agent.py
@@ -362,12 +371,14 @@ app/
 │   ├── pending_travel_handler.py    # location + departure-reminder gate
 │   ├── pending_list_handler.py      # list choice / delete-confirm / disambiguation gate
 │   ├── pending_drive_handler.py     # Drive file-choice / modify-confirmation gate
+│   ├── pending_reminder_handler.py  # reminder time-clarify / reminder-vs-event / post-delivery follow-up gate
 │   └── account_link_handler.py      # add-2nd-calendar-account gate (provider ask + link)
 ├── repositories/
 │   ├── expense_repository.py
 │   ├── user_repository.py
 │   ├── unknown_message_repository.py
 │   ├── scheduled_reminder_repository.py
+│   ├── user_reminder_repository.py  # `user_reminders` collection (ReminderAgent — isolated)
 │   └── list_repository.py           # `lists` collection
 │   # DriveAgent uses no repository — Drive API is its store of record
 ├── db/
@@ -464,6 +475,7 @@ ENVIRONMENT=development|production
 16. **Drive writes only after explicit user confirmation.** The LLM never rewrites file content — Layer 1 extracts a structured `drive_edit` spec; `edit_resolver` resolves it deterministically and REFUSES (no_match / multiple_matches) instead of guessing; `propose_modification` only stages a preview; `apply_modification` is the sole writer, gate-only, and re-checks `headRevisionId` before writing (revision drift → abort, no write). Never add a Drive write path that bypasses this.
 17. **Drive OAuth stays isolated.** Never route Drive consent through the shared `google_oauth_state_token` / `connected_accounts` / calendar callback. Drive has its own `google_drive_oauth_*` namespace and `google_drive_refresh_token`. Mixing them lets a Drive consent mutate a calendar account.
 18. **The LLM never selects rows for a structured Drive query.** For tabular `analyze` (filter/group/count over a Sheet/.xlsx), Layer 1 emits a `drive_query` spec; `query_resolver` selects EVERY matching row deterministically and REFUSES (`query_column_not_found` / `query_bad_date` / `query_no_rows`) instead of guessing. Layer 4 renders the complete result deterministically and the warm-wrapper LLM is post-checked (drop an anchor → fall back to the skeleton). Never add a path where an LLM decides which rows match — it samples and silently drops data (the April-2026 tax-deadline incident). Prose/free-form analysis stays LLM-driven but is bound by the mandatory-completeness clause in `FORMATTING_PROMPT`.
+19. **Personal reminders are an isolated domain.** `ReminderAgent` (`app/agents/reminder_agent/`) uses its OWN `user_reminders` collection, `UserReminderRepository`, and cron passes 6–7 (`_run_user_reminders` / `_sweep_stale_reminder_followups`). Never reuse `scheduled_reminders` / `ScheduledReminderRepository` / `_run_departure_reminders` (TravelAgent owns those). The reminder-vs-event ambiguity is resolved INSIDE the reminder package (its own `pending_reminder` clarify gate) — never via the router-level `Disambiguation` (coupled to ListAgent). Time resolution is pure/deterministic (`_shared/time_resolver`): morning→09:00, afternoon→15:00, night→19:00 in the user's tz; no time-of-day → clarify gate. Post-delivery follow-up state is durable (`status="awaiting_followup"` on the doc, not in-memory) with a 10-min reply window enforced in BOTH the gate and the cron sweep. Distinct from the calendar reminders on/off SETTING (`REMINDER_TOGGLE_KEYWORDS` → CalendarAgent, priority 0 — untouched).
 
 ---
 

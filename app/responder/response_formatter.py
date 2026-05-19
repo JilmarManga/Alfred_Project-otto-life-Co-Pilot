@@ -98,6 +98,7 @@ _FALLBACKS = {
     "AmbiguityAgent":   {"es": "¿En qué te puedo ayudar? 🐙", "en": "What can I help you with? 🐙"},
     "GreetingAgent":    {"es": "¡Hola! ¿En qué te puedo ayudar? 🐙", "en": "Hey! How can I help? 🐙"},
     "TypeClarifyAgent": {"es": "¿Es una cita en tu agenda o un gasto? 🗓️", "en": "Is this a calendar appointment or an expense? 🗓️"},
+    "ReminderAgent":    {"es": "Listo con tu recordatorio ✅", "en": "Reminder handled ✅"},
 }
 
 _NEEDS_CURRENCY = {
@@ -122,6 +123,7 @@ _ERROR_MESSAGES = {
     "GreetingAgent": {"es": "¡Hola! 🐙", "en": "Hey! 🐙"},
     "ListAgent":     {"es": "No pude procesar tu lista. Intenta de nuevo 🙏", "en": "Couldn't process your list. Try again 🙏"},
     "DriveAgent":    {"es": "No pude acceder a ese archivo. Intenta de nuevo 🙏", "en": "Couldn't access that file. Try again 🙏"},
+    "ReminderAgent": {"es": "No pude procesar tu recordatorio. Intenta de nuevo 🙏", "en": "Couldn't process your reminder. Try again 🙏"},
 }
 
 # Error codes that beat the generic agent-level error message above.
@@ -138,6 +140,19 @@ _SPECIFIC_ERRORS = {
     "reminder_toggle_failed": {
         "es": "No pude actualizar tus recordatorios. Intenta de nuevo 🙏",
         "en": "Couldn't update your reminders. Try again 🙏",
+    },
+    # ReminderAgent (personal reminders) — distinct from the toggle setting above
+    "reminder_missing_text": {
+        "es": "¿De qué te recuerdo? Dímelo otra vez 🙂",
+        "en": "Remind you of what? Tell me again 🙂",
+    },
+    "reminder_not_found": {
+        "es": "No encontré ese recordatorio 🔎",
+        "en": "I couldn't find that reminder 🔎",
+    },
+    "reminder_create_failed": {
+        "es": "No pude guardar el recordatorio. Intenta de nuevo 🙏",
+        "en": "Couldn't save the reminder. Try again 🙏",
     },
     # TravelAgent — location resolution errors
     "geocode_not_found": {
@@ -715,6 +730,53 @@ def _build_clarify_message(data: dict, lang: str) -> str:
     return template.format(title=title, time=time_display)
 
 
+# ---- ReminderAgent hardcoded copy (no LLM — text echoed from parser) ----- #
+_REMINDER_SET_COPY = {
+    "es": "Listo ✅ Te recuerdo: “{text}” — {when}.",
+    "en": "Done ✅ I'll remind you: “{text}” — {when}.",
+}
+_REMINDER_NEED_TIME_COPY = {
+    "es": "¿A qué hora? ¿O en la mañana / tarde / noche? ⏰",
+    "en": "What time? Or morning / afternoon / night? ⏰",
+}
+_REMINDER_OR_EVENT_COPY = {
+    "es": "¿Quieres que te lo recuerde, o que lo agregue a tu calendario? 🐙",
+    "en": "Do you want a reminder, or should I add it to your calendar? 🐙",
+}
+_REMINDER_RESCHEDULED_COPY = {
+    "es": "Listo, te lo recuerdo de nuevo — {when} 🔔",
+    "en": "Got it, I'll remind you again — {when} 🔔",
+}
+_REMINDER_FOLLOWUP_DISMISSED_COPY = {
+    "es": "Listo, lo borré 🗑️",
+    "en": "Done, deleted it 🗑️",
+}
+_REMINDER_CANCELLED_COPY = {
+    "es": "Listo, cancelé el recordatorio “{text}” 🗑️",
+    "en": "Done, cancelled the reminder “{text}” 🗑️",
+}
+_REMINDER_LIST_HEADER_COPY = {
+    "es": "🔔 Tus recordatorios:",
+    "en": "🔔 Your reminders:",
+}
+_REMINDER_LIST_EMPTY_COPY = {
+    "es": "No tienes recordatorios activos 🙂",
+    "en": "You have no active reminders 🙂",
+}
+_REMINDER_CANCEL_CHOICE_COPY = {
+    "es": "¿Cuál cancelo?\n{options}",
+    "en": "Which one should I cancel?\n{options}",
+}
+
+
+def _render_reminder_list(reminders: list, lang: str) -> str:
+    lines = [_REMINDER_LIST_HEADER_COPY.get(lang, _REMINDER_LIST_HEADER_COPY["es"])]
+    for i, r in enumerate(reminders):
+        when = _format_time_for_clarify(r.get("fire_at"), lang)
+        lines.append(f"{i + 1}. {r.get('reminder_text') or ''} — {when}")
+    return "\n".join(lines)
+
+
 def format_response(result: AgentResult, user: dict) -> str:
     """
     Layer 4: Convert AgentResult → warm WhatsApp message string.
@@ -853,6 +915,44 @@ def format_response(result: AgentResult, user: dict) -> str:
             )
         # drive_analyze falls through to the LLM path below (the one
         # sanctioned analysis call — see FORMATTING_PROMPT DriveAgent).
+
+    # ReminderAgent — every branch deterministic (no LLM; the reminder text is
+    # echoed verbatim from the parser, never generated).
+    if agent == "ReminderAgent" and result.success:
+        if data_type == "reminder_set":
+            return _REMINDER_SET_COPY.get(lang, _REMINDER_SET_COPY["es"]).format(
+                text=data.get("reminder_text") or "",
+                when=_format_time_for_clarify(data.get("fire_at"), lang),
+            )
+        if data_type == "reminder_need_time":
+            return _REMINDER_NEED_TIME_COPY.get(lang, _REMINDER_NEED_TIME_COPY["es"])
+        if data_type == "reminder_or_event":
+            return _REMINDER_OR_EVENT_COPY.get(lang, _REMINDER_OR_EVENT_COPY["es"])
+        if data_type == "reminder_rescheduled":
+            return _REMINDER_RESCHEDULED_COPY.get(lang, _REMINDER_RESCHEDULED_COPY["es"]).format(
+                when=_format_time_for_clarify(data.get("fire_at"), lang),
+            )
+        if data_type == "reminder_followup_dismissed":
+            return _REMINDER_FOLLOWUP_DISMISSED_COPY.get(
+                lang, _REMINDER_FOLLOWUP_DISMISSED_COPY["es"],
+            )
+        if data_type == "reminder_cancelled":
+            return _REMINDER_CANCELLED_COPY.get(lang, _REMINDER_CANCELLED_COPY["es"]).format(
+                text=data.get("reminder_text") or "",
+            )
+        if data_type == "reminder_list":
+            return _render_reminder_list(data.get("reminders") or [], lang)
+        if data_type == "reminder_list_empty":
+            return _REMINDER_LIST_EMPTY_COPY.get(lang, _REMINDER_LIST_EMPTY_COPY["es"])
+        if data_type == "reminder_cancel_choice":
+            cands = data.get("candidates") or []
+            options = "\n".join(
+                f"{i + 1}. {c.get('reminder_text') or ''}"
+                for i, c in enumerate(cands)
+            )
+            return _REMINDER_CANCEL_CHOICE_COPY.get(lang, _REMINDER_CANCEL_CHOICE_COPY["es"]).format(
+                options=options,
+            )
 
     # Special case: expense needs a currency answer — not a real error.
     if agent == "ExpenseAgent" and data.get("needs_currency"):

@@ -16,6 +16,7 @@ from app.handlers.pending_event_handler import handle_pending_event
 from app.handlers.account_link_handler import handle_account_link
 from app.handlers.pending_list_handler import handle_pending_list
 from app.handlers.pending_drive_handler import handle_pending_drive
+from app.handlers.pending_reminder_handler import handle_pending_reminder
 from app.handlers.pending_travel_handler import handle_pending_travel
 from app.db.user_context_store import update_user_context
 from app.models.agent_result import AgentResult
@@ -98,6 +99,9 @@ async def receive_webhook(request: Request) -> dict:
 
     if handle_pending_drive(inbound, user):
         return {"status": "pending_drive"}
+
+    if handle_pending_reminder(inbound, user):
+        return {"status": "pending_reminder"}
 
     if handle_account_link(inbound, user):
         return {"status": "account_link"}
