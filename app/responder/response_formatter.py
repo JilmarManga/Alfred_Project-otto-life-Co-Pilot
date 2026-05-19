@@ -470,33 +470,86 @@ _DRIVE_QUERY_SUM_COPY = {
 }
 
 
+def _col_is_constant(rows: list, header: str) -> bool:
+    """True iff `header` has the same non-empty value in every row."""
+    seen = {str(r.get(header, "")).strip() for r in rows}
+    return len(seen) == 1 and "" not in seen
+
+
 def _drive_query_skeleton(result: dict, file_name: str, lang: str) -> str:
     """Deterministic, COMPLETE rendering of a query result. No LLM. This is
-    what guarantees no row is ever dropped."""
-    headers = result.get("headers") or []
+    what guarantees no row is ever dropped.
 
-    def _row_text(row: dict) -> str:
-        if len(headers) == 1:
-            return str(row.get(headers[0], "")).strip()
-        parts = [f"{h}: {row[h]}" for h in headers if str(row.get(h, "")).strip()]
-        return " · ".join(parts)
+    Compaction (all deterministic, every distinct value still printed once so
+    the anchor post-check holds):
+      - the group-by column is the bold group header, never repeated in rows;
+      - columns constant across ALL matched rows → one italic context line;
+      - columns constant within EVERY group → folded onto the group header;
+      - only the remaining varying value(s) render per bullet.
+    """
+    sel_headers = result.get("headers") or []
+    group_by = result.get("group_by")
+    groups = result.get("groups")
+
+    # Body columns = selected headers minus the group-by col (shown as the key).
+    data_headers = [h for h in sel_headers if h != group_by]
+
+    all_rows = []
+    if groups:
+        for g in groups:
+            all_rows.extend(g.get("rows") or [])
+    else:
+        all_rows = result.get("rows") or []
+
+    const_cols = [h for h in data_headers
+                  if all_rows and _col_is_constant(all_rows, h)]
+    remaining = [h for h in data_headers if h not in const_cols]
+
+    fold_cols: list = []
+    if groups:
+        fold_cols = [
+            h for h in remaining
+            if all(_col_is_constant(g.get("rows") or [], h)
+                    for g in groups if g.get("rows"))
+        ]
+    row_cols = [h for h in remaining if h not in fold_cols]
+
+    def _bullet(row: dict) -> str:
+        vals = [str(row.get(h, "")).strip() for h in row_cols
+                if str(row.get(h, "")).strip()]
+        return " · ".join(vals)
 
     lines = [
         _DRIVE_QUERY_HEADER_COPY.get(lang, _DRIVE_QUERY_HEADER_COPY["es"]).format(
             file_name=file_name or "",
         ),
-        "",
     ]
-    groups = result.get("groups")
+    if const_cols and all_rows:
+        ctx = " · ".join(
+            f"{h}: {str(all_rows[0].get(h, '')).strip()}" for h in const_cols
+        )
+        lines.append(f"_{ctx}_")
+    lines.append("")
+
     if groups:
         for g in groups:
-            lines.append(f"· *{g['key']}* ({g['count']})")
-            for row in g["rows"]:
-                lines.append(f"  - {_row_text(row)}")
+            grows = g.get("rows") or []
+            head = f"· *{g['key']}*"
+            for h in fold_cols:
+                fv = str(grows[0].get(h, "")).strip() if grows else ""
+                if fv:
+                    head += f" · {fv}"
+            head += f" ({g['count']})"
+            lines.append(head)
+            for row in grows:
+                b = _bullet(row)
+                if b:
+                    lines.append(f"  - {b}")
             lines.append("")
     else:
-        for row in result.get("rows") or []:
-            lines.append(f"· {_row_text(row)}")
+        for row in all_rows:
+            b = _bullet(row)
+            lines.append(f"· {b}" if b else "·")
         lines.append("")
 
     agg = result.get("aggregate")
