@@ -208,6 +208,38 @@ def test_skeleton_renders_every_group_and_row():
     assert sk.count("  - ") == 9  # every row line present
 
 
+def test_skeleton_compacts_constant_columns_but_keeps_every_anchor():
+    """The image-2 production case: a spec with NO `select`, so every column
+    projects. The skeleton must NOT repeat constant columns on every row —
+    it lifts them to one context line — yet every distinct value still
+    appears verbatim so the anchor post-check still holds (no row loss)."""
+    no_select = {
+        "filters": [
+            {"column": "Estado", "op": "eq", "value": "pendiente"},
+            {"column": "Vencimiento", "op": "date_eq", "value": "19 de mayo"},
+        ],
+        "group_by": "Cliente",
+    }
+    res = resolve_query(INCIDENT_GRID, no_select)
+    sk = rf._drive_query_skeleton(res, "Prueba Copiloto Abril 2026", "es")
+
+    # Constant columns are lifted once, never repeated per bullet.
+    assert "_Vencimiento: 19/05/2026 · Estado: Pendiente_" in sk
+    assert "Estado: Pendiente" not in sk.replace(
+        "_Vencimiento: 19/05/2026 · Estado: Pendiente_", "")
+    # Group-by column is the header, not echoed in row bodies.
+    assert "Cliente:" not in sk
+    # Still complete: 4 groups, 9 varying rows, all clients present.
+    assert sk.count("  - ") == 9
+    for name in ("KDESIGN", "RETEKI", "INVERSIONES APARICIO AYALA",
+                 "COMERCIALIZADORA MHERG"):
+        assert name in sk
+    # Completeness contract intact: every anchor survives verbatim.
+    anchors = rf._query_anchors(res)
+    folded = rf._fold_text(sk)
+    assert all(rf._fold_text(a) in folded for a in anchors)
+
+
 def test_post_check_rejects_llm_output_that_drops_a_client():
     res = resolve_query(INCIDENT_GRID, INCIDENT_SPEC)
     sk = rf._drive_query_skeleton(res, "F", "es")
