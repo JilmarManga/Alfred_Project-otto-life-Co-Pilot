@@ -212,6 +212,50 @@ def read_sheet_values(
     return target, resp.get("values", [])
 
 
+def _xlsx_first_sheet_grid(data: bytes) -> List[List[str]]:
+    """First worksheet of an uploaded .xlsx as a 2-D string grid — the same
+    shape `read_sheet_values` returns for native Sheets, so query_resolver
+    consumes both identically."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        return [
+            ["" if c is None else str(c) for c in row]
+            for row in ws.iter_rows(values_only=True)
+        ]
+    finally:
+        wb.close()
+
+
+def get_grid(
+    refresh_token: str, file_id: str, mime_type: str,
+) -> Optional[List[List[str]]]:
+    """Return a 2-D string grid (row 0 = headers) for TABULAR files only:
+
+      - Google Sheet → first tab via the Sheets API (FORMATTED_VALUE)
+      - .xlsx        → first worksheet parsed locally
+      - text/csv     → parsed with the csv module
+
+    Returns None for every non-tabular type (Docs, plain text, .docx, binary)
+    so the caller falls back to the free-form analyze path. Unlike
+    `get_content`, the grid is NOT char-truncated — row selection must be
+    complete; size is bounded by the source file.
+    """
+    if mime_type == GOOGLE_SHEET:
+        _, values = read_sheet_values(refresh_token, file_id)
+        return [[str(c) for c in row] for row in values]
+    if mime_type == XLSX:
+        service = get_drive_service_for_user(refresh_token)
+        return _xlsx_first_sheet_grid(_download_bytes(service, file_id))
+    if mime_type == "text/csv":
+        service = get_drive_service_for_user(refresh_token)
+        text = _download_text(service, file_id)
+        return [row for row in csv.reader(io.StringIO(text))]
+    return None
+
+
 def get_content(refresh_token: str, file_id: str, mime_type: str) -> Optional[str]:
     """Return a text rendering of the file for reading/analysis:
 

@@ -64,6 +64,12 @@ ParsedMessage(
     list_name: Optional[str],         # as typed, never normalized/translated
     list_item: Optional[str],         # URL or text to save
     list_label: Optional[str],        # optional short label per item
+    drive_intent: Optional[Literal["find","read","analyze","modify"]],
+    drive_file_ref: Optional[str],    # file name as the user referred to it
+    drive_edit: Optional[dict],       # structured edit spec — modify only
+    drive_query: Optional[dict],      # structured tabular query spec — analyze
+                                      # only; resolved deterministically by
+                                      # query_resolver, LLM never selects rows
 )
 ```
 
@@ -152,7 +158,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 | `GreetingAgent` | `greeting_agent.py` | Hardcoded responses, no LLM, no Firestore |
 | `AmbiguityAgent` | `ambiguity_agent.py` | Phrase-scan for out-of-scope vs true ambiguity; logs to `unknown_messages` |
 | `ListAgent` | `list_agent/` (package) | Save/recall/delete user-defined named lists; 3-list cap, 10-min dedup, stages delete confirm |
-| `DriveAgent` | `drive_agent/` (package) | Google Drive find/read/analyze + **confirm-before-write** modify (Docs/Sheets/text). LLM never rewrites content — parser extracts a structured edit spec, skill resolves it deterministically, write only after explicit user confirmation + revision guard |
+| `DriveAgent` | `drive_agent/` (package) | Google Drive find/read/analyze + **confirm-before-write** modify (Docs/Sheets/text). LLM never rewrites content — parser extracts a structured edit spec, skill resolves it deterministically, write only after explicit user confirmation + revision guard. **Structured tabular `analyze`** (filter/group/count over a Sheet/.xlsx) is also deterministic: parser emits `drive_query`, `_shared/query_resolver` selects EVERY matching row (no LLM row selection); only prose/free-form analysis stays LLM-driven |
 
 **Key behaviors:**
 - `ExpenseAgent`: category validated against `{"food","transport","shopping","health","other"}`. Non-standard hints fall back to "other" + keyword scan.
@@ -189,7 +195,7 @@ REMINDER_TOGGLE_KEYWORDS = REMINDER_OFF_KEYWORDS | REMINDER_ON_KEYWORDS
 - `ListAgent` failure codes → `list_not_found` / `list_cap_reached` / `empty_list` render from `data` (existing_names, requested_name, list_name); `save_failed` / `delete_failed` / `missing_item` use `_SPECIFIC_ERRORS` (no LLM)
 - `ExpenseAgent` `needs_currency=True` → currency-ask prompt (no LLM)
 - `result.success=False` → `_SPECIFIC_ERRORS` first, then `_ERROR_MESSAGES` per agent (no LLM)
-- `DriveAgent` types → all hardcoded ES/EN copy (no LLM): `drive_find`, `drive_read`, `drive_file_choice`, `drive_modify_preview` (the explicit authorization prompt — cell/replace/append variants), `drive_modify_applied`, `drive_modify_revision_conflict`. `drive_connect_link_sent` / `drive_token_invalid_handled` → `""` (agent already DM'd the link; webhook drops empty). `drive_analyze` is the **only** Drive LLM path (answers the user's question over fetched content via `FORMATTING_PROMPT`). Drive failure codes → `_SPECIFIC_ERRORS` (`drive_not_connected`, `file_not_found`, `unsupported_file_type`, `edit_no_match`, `edit_multiple_matches`, `edit_column_not_found`, `invalid_edit_spec`, `edit_unsupported_for_type`, `modify_failed`, …)
+- `DriveAgent` types → all hardcoded ES/EN copy (no LLM): `drive_find`, `drive_read`, `drive_file_choice`, `drive_modify_preview` (the explicit authorization prompt — cell/replace/append variants), `drive_modify_applied`, `drive_modify_revision_conflict`. `drive_connect_link_sent` / `drive_token_invalid_handled` → `""` (agent already DM'd the link; webhook drops empty). `drive_query_result` (structured tabular query) → a **fully deterministic skeleton** (`_drive_query_skeleton`: every group/row/count) wrapped by one LLM call for warmth ONLY, gated by `_warm_wrap_query`'s post-check (every group key + cell value must survive verbatim, else the skeleton is sent as-is — row loss is structurally impossible). `drive_analyze` is the only **content-generating** Drive LLM path (prose/free-form questions over fetched content via `FORMATTING_PROMPT`, now with a mandatory-completeness clause). Drive failure codes → `_SPECIFIC_ERRORS` (`drive_not_connected`, `file_not_found`, `unsupported_file_type`, `edit_no_match`, `edit_multiple_matches`, `edit_column_not_found`, `invalid_edit_spec`, `edit_unsupported_for_type`, `modify_failed`, `invalid_query_spec`, `query_column_not_found`, `query_bad_date`, `query_no_headers`, `query_no_rows`, …)
 - All other success → GPT-4o-mini with `FORMATTING_PROMPT`; fallback to `_TYPE_FALLBACKS` then `_FALLBACKS`
 
 **Language:** `user["language"]` from Firestore. Prompt + user_content both enforce it.
@@ -340,6 +346,8 @@ app/
 │   ├── travel_agent/            # Agent/Skill package — reference implementation (see OTTO_AGENTS.md)
 │   ├── list_agent/              # Agent/Skill package — save/recall/delete named lists
 │   ├── drive_agent/             # Agent/Skill package — Drive find/read/analyze/confirmed-modify
+│   │     # _shared/edit_resolver.py  — deterministic modify-spec resolver
+│   │     # _shared/query_resolver.py — deterministic tabular-query resolver (analyze)
 │   ├── summary_agent.py
 │   ├── weather_agent.py
 │   ├── greeting_agent.py
@@ -375,7 +383,7 @@ app/
 │   ├── google_calendar.py           # Google: get_today_events_for_user, create_event_for_user, get_upcoming_events_window, normalize_events
 │   ├── microsoft_calendar.py        # Microsoft Graph sibling — returns Google-shaped event dicts
 │   ├── calendar_accounts.py         # provider-agnostic merged accessor — ALL calendar consumers use this
-│   ├── google_drive.py              # Drive API: search/read/export + Sheets/Docs read & write helpers
+│   ├── google_drive.py              # Drive API: search/read/export + Sheets/Docs read & write helpers + get_grid (tabular grid for query_resolver)
 │   ├── google_drive_oauth.py        # Drive OAuth — ISOLATED copy of google_oauth (own state namespace)
 │   ├── drive_connect.py             # Drive connect/reconnect link sender (Drive namespace)
 │   ├── google_oauth.py              # build_authorize_url(), exchange_code()
@@ -455,6 +463,7 @@ ENVIRONMENT=development|production
 15. **OAuth PKCE verifier must be stored and retrieved.** `build_authorize_url()` returns `(url, code_verifier)`. Store in Firestore at `/authorize`, pass to `exchange_code(code_verifier=...)` at `/callback`. Omitting causes `(invalid_grant) Missing code verifier`.
 16. **Drive writes only after explicit user confirmation.** The LLM never rewrites file content — Layer 1 extracts a structured `drive_edit` spec; `edit_resolver` resolves it deterministically and REFUSES (no_match / multiple_matches) instead of guessing; `propose_modification` only stages a preview; `apply_modification` is the sole writer, gate-only, and re-checks `headRevisionId` before writing (revision drift → abort, no write). Never add a Drive write path that bypasses this.
 17. **Drive OAuth stays isolated.** Never route Drive consent through the shared `google_oauth_state_token` / `connected_accounts` / calendar callback. Drive has its own `google_drive_oauth_*` namespace and `google_drive_refresh_token`. Mixing them lets a Drive consent mutate a calendar account.
+18. **The LLM never selects rows for a structured Drive query.** For tabular `analyze` (filter/group/count over a Sheet/.xlsx), Layer 1 emits a `drive_query` spec; `query_resolver` selects EVERY matching row deterministically and REFUSES (`query_column_not_found` / `query_bad_date` / `query_no_rows`) instead of guessing. Layer 4 renders the complete result deterministically and the warm-wrapper LLM is post-checked (drop an anchor → fall back to the skeleton). Never add a path where an LLM decides which rows match — it samples and silently drops data (the April-2026 tax-deadline incident). Prose/free-form analysis stays LLM-driven but is bound by the mandatory-completeness clause in `FORMATTING_PROMPT`.
 
 ---
 

@@ -26,3 +26,4 @@ class ParsedMessage(BaseModel):
     drive_intent: Optional[Literal["find", "read", "analyze", "modify"]] = Field(None, description="User's Google Drive operation intent, or None.")
     drive_file_ref: Optional[str] = Field(None, description="Drive file name exactly as the user referred to it — not normalized or translated.")
     drive_edit: Optional[Dict[str, Any]] = Field(None, description="Structured, deterministic edit spec for a modify intent. Validated by the agent before anything is staged; never applied without explicit user confirmation.")
+    drive_query: Optional[Dict[str, Any]] = Field(None, description="Structured tabular query spec for an analyze intent over a spreadsheet (filters/group_by/select/sort/aggregate). Resolved deterministically by query_resolver — the LLM never selects rows. Null when the analyze request is not a structured row query (free-form/prose analysis).")

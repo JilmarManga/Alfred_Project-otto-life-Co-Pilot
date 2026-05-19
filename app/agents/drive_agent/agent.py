@@ -131,6 +131,7 @@ class DriveAgent(BaseAgent):
                     "intent": intent,
                     "original_text": parsed.raw_message,
                     "edit_spec": getattr(parsed, "drive_edit", None),
+                    "query_spec": getattr(parsed, "drive_query", None),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 })
         return result
@@ -224,6 +225,7 @@ class DriveAgent(BaseAgent):
                 "intent": data.get("intent", "read"),
                 "candidates": data.get("candidates", []),
                 "edit_spec": data.get("edit_spec"),
+                "query_spec": data.get("query_spec"),
             })
 
         return AgentResult(

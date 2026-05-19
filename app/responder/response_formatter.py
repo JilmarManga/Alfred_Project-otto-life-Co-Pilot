@@ -79,7 +79,8 @@ AmbiguityAgent:
 
 DriveAgent:
 - Only type "drive_analyze" reaches you. The data has [file_name], [question] (what the user asked), and [content] (the file's text).
-- Answer the user's [question] about [file_name] using ONLY [content]. Be concise and conversational — a short paragraph or a few bullet lines, WhatsApp-style.
+- Answer the user's [question] about [file_name] using ONLY [content]. Be conversational and WhatsApp-style.
+- COMPLETENESS IS MANDATORY: if the user asked you to list, enumerate, count, or group items/rows/entries, you MUST include EVERY single matching one. Never sample, summarize away, truncate, or say "among others" / "entre otros" / "etc." Brevity NEVER overrides completeness — a long but complete list is correct; a short incomplete one is a failure.
 - Never invent facts that aren't in [content]. If [content] doesn't answer it, say so plainly and briefly.
 - Do not echo the raw file content back wholesale. Summarize or extract what was asked.
 - Never use curly-brace variables — only square-bracket placeholders.
@@ -224,6 +225,28 @@ _SPECIFIC_ERRORS = {
         "es": "No pude aplicar el cambio. No modifiqué nada — intenta de nuevo 🙏",
         "en": "I couldn't apply the change. Nothing was modified — try again 🙏",
     },
+    # Drive structured-query resolution codes. Honest over incomplete: better
+    # to say why than to return a partial answer for money/business data.
+    "invalid_query_spec": {
+        "es": "No me quedó claro qué buscar exactamente 🤔 Dime qué filtrar (columna y valor) y cómo agruparlo.",
+        "en": "I didn't get exactly what to look up 🤔 Tell me what to filter (column and value) and how to group it.",
+    },
+    "query_column_not_found": {
+        "es": "No encontré esa columna en la hoja 🤔 Revisa el nombre del encabezado y dime de nuevo.",
+        "en": "I couldn't find that column in the sheet 🤔 Check the header name and tell me again.",
+    },
+    "query_bad_date": {
+        "es": "No entendí bien la fecha 📅 Dímela como día y mes, por ejemplo “19 de mayo”.",
+        "en": "I couldn't read that date 📅 Give it to me as day and month, e.g. “May 19”.",
+    },
+    "query_no_headers": {
+        "es": "Esa hoja no parece tener encabezados, así que no pude consultarla 🙂",
+        "en": "That sheet doesn't seem to have headers, so I couldn't query it 🙂",
+    },
+    "query_no_rows": {
+        "es": "Revisé el archivo y no encontré ninguna fila que cumpla esos criterios 🙂",
+        "en": "I went through the file and found no rows matching those criteria 🙂",
+    },
 }
 
 # Per-type success fallbacks used when the LLM formatting call fails for a
@@ -238,6 +261,12 @@ _TYPE_FALLBACKS = {
     "drive_analyze": {
         "es": "Revisé el archivo, pero no pude resumirlo ahora 🙏 Intenta de nuevo.",
         "en": "I went through the file but couldn't summarize it just now 🙏 Try again.",
+    },
+    # Never reached in practice (the skeleton is itself the deterministic
+    # fallback inside _warm_wrap_query) — defined for completeness.
+    "drive_query_result": {
+        "es": "Revisé el archivo 🙂 Pídemelo de nuevo y te paso el detalle.",
+        "en": "I went through the file 🙂 Ask me again and I'll give you the details.",
     },
 }
 
@@ -410,6 +439,141 @@ _DRIVE_REVISION_CONFLICT_COPY = {
     "es": "*{file_name}* cambió desde que te mostré la vista previa, así que no apliqué nada por seguridad 🙂 Pídemelo de nuevo y reviso el estado actual.",
     "en": "*{file_name}* changed since I showed you the preview, so I didn't apply anything to be safe 🙂 Ask me again and I'll re-check the current state.",
 }
+
+
+# Structured tabular query result. The skeleton below is rendered 100%
+# deterministically from query_resolver's output — every group, every row,
+# every count. It is the source of truth for completeness. The LLM only ever
+# adds a warm intro/outro around it and is post-checked (see _warm_wrap_query).
+_DRIVE_QUERY_HEADER_COPY = {
+    "es": "Esto es lo que encontré en *{file_name}*:",
+    "en": "Here's what I found in *{file_name}*:",
+}
+_DRIVE_QUERY_COUNT_COPY = {
+    "es": "Total: {n}",
+    "en": "Total: {n}",
+}
+_DRIVE_QUERY_SUM_COPY = {
+    "es": "Total {column}: {value}",
+    "en": "Total {column}: {value}",
+}
+
+
+def _drive_query_skeleton(result: dict, file_name: str, lang: str) -> str:
+    """Deterministic, COMPLETE rendering of a query result. No LLM. This is
+    what guarantees no row is ever dropped."""
+    headers = result.get("headers") or []
+
+    def _row_text(row: dict) -> str:
+        if len(headers) == 1:
+            return str(row.get(headers[0], "")).strip()
+        parts = [f"{h}: {row[h]}" for h in headers if str(row.get(h, "")).strip()]
+        return " · ".join(parts)
+
+    lines = [
+        _DRIVE_QUERY_HEADER_COPY.get(lang, _DRIVE_QUERY_HEADER_COPY["es"]).format(
+            file_name=file_name or "",
+        ),
+        "",
+    ]
+    groups = result.get("groups")
+    if groups:
+        for g in groups:
+            lines.append(f"· *{g['key']}* ({g['count']})")
+            for row in g["rows"]:
+                lines.append(f"  - {_row_text(row)}")
+            lines.append("")
+    else:
+        for row in result.get("rows") or []:
+            lines.append(f"· {_row_text(row)}")
+        lines.append("")
+
+    agg = result.get("aggregate")
+    if agg and agg.get("kind") == "count":
+        lines.append(_DRIVE_QUERY_COUNT_COPY.get(
+            lang, _DRIVE_QUERY_COUNT_COPY["es"]).format(n=agg["value"]))
+    elif agg and agg.get("kind") == "sum":
+        lines.append(_DRIVE_QUERY_SUM_COPY.get(
+            lang, _DRIVE_QUERY_SUM_COPY["es"]).format(
+                column=agg["column"], value=agg["value"]))
+
+    return "\n".join(lines).strip()
+
+
+def _query_anchors(result: dict) -> list:
+    """Every data token that MUST survive into the final message: all group
+    keys + every distinct selected cell value. Used to verify the LLM wrapper
+    didn't drop, merge, or summarize anything."""
+    anchors = set()
+    groups = result.get("groups")
+    rows = []
+    if groups:
+        for g in groups:
+            if str(g.get("key", "")).strip():
+                anchors.add(str(g["key"]).strip())
+            rows.extend(g.get("rows") or [])
+    else:
+        rows = result.get("rows") or []
+    for row in rows:
+        for v in row.values():
+            if str(v).strip():
+                anchors.add(str(v).strip())
+    return list(anchors)
+
+
+def _warm_wrap_query(skeleton: str, result: dict, file_name: str,
+                      question: str, lang: str) -> str:
+    """One LLM call to add a warm WhatsApp intro/outro around the COMPLETE
+    skeleton — Otto's human voice, kept. Then a deterministic post-check:
+    every anchor (group key / cell value) must appear verbatim in the LLM
+    output, or we discard it and send the skeleton as-is. Losing a row
+    therefore requires BOTH a resolver bug AND a post-check bug."""
+    anchors = _query_anchors(result)
+    try:
+        lang_name = "Spanish" if lang == "es" else "English"
+        system_prompt = (
+            f"You are Otto, a warm WhatsApp assistant. Respond in {lang_name} "
+            f"ONLY. You are given a COMPLETE, already-formatted answer to the "
+            f"user's question about a file. Your ONLY job: add a short, warm "
+            f"one-line intro before it and (optionally) a brief friendly "
+            f"closing line after it. You MUST reproduce every single data "
+            f"line EXACTLY as given — same items, same grouping, same order, "
+            f"same counts. NEVER drop, add, merge, reorder, summarize, or "
+            f"reword any data line. Do not say 'among others' or 'etc.'. "
+            f"Keep all *bold* and bullet formatting. No preamble."
+        )
+        user_content = (
+            f"User's question: {question}\n"
+            f"File: {file_name}\n\n"
+            f"COMPLETE ANSWER (reproduce all data lines verbatim):\n{skeleton}"
+        )
+        response = openai.chat.completions.create(
+            model=GPT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+        )
+        wrapped = (response.choices[0].message.content or "").strip()
+        if not wrapped:
+            return skeleton
+        folded = _fold_text(wrapped)
+        if all(_fold_text(a) in folded for a in anchors):
+            return wrapped
+        logger.warning(
+            "drive_query warm wrap dropped anchors — falling back to skeleton",
+        )
+    except Exception as exc:
+        logger.warning("drive_query warm wrap failed: %s", exc)
+    return skeleton
+
+
+def _fold_text(s: str) -> str:
+    import unicodedata
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in s if not unicodedata.combining(c))
 
 
 def _render_drive_options(items: list) -> str:
@@ -679,6 +843,14 @@ def format_response(result: AgentResult, user: dict) -> str:
             return _DRIVE_REVISION_CONFLICT_COPY.get(
                 lang, _DRIVE_REVISION_CONFLICT_COPY["es"],
             ).format(file_name=data.get("file_name") or "")
+        if data_type == "drive_query_result":
+            res = data.get("result") or {}
+            file_name = data.get("file_name") or ""
+            skeleton = _drive_query_skeleton(res, file_name, lang)
+            return _warm_wrap_query(
+                skeleton, res, file_name,
+                data.get("question") or "", lang,
+            )
         # drive_analyze falls through to the LLM path below (the one
         # sanctioned analysis call — see FORMATTING_PROMPT DriveAgent).
 

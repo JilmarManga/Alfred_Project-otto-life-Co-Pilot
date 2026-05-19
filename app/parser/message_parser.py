@@ -177,6 +177,23 @@ find, read, analyze, or modify a file/document/spreadsheet in their Drive:
   * Append text to a doc/text file:
     {"op":"append_text","text":<text to add>}
   Use null for drive_edit unless the user gave an explicit, unambiguous change.
+- drive_query: ONLY when drive_intent is "analyze" AND the user is asking a
+  STRUCTURED ROW QUERY over a spreadsheet/table (filter rows by column values,
+  and/or group/sort/count/sum them). This is for questions like "todos los
+  vencimientos del 19 de mayo con estado pendiente agrupados por cliente" or
+  "which clients still owe payment, grouped by client". Shape:
+    {"filters":[{"column":<header exactly as it appears in the file>,
+                 "op":"eq"|"contains"|"date_eq",
+                 "value":<value the user is filtering on, as they said it>}],
+     "group_by":<header to group rows by, or null>,
+     "select":[<headers to show per row>] or null (null = show all columns),
+     "sort":<header to sort by, or null>,
+     "aggregate":"count" | "sum:<header>" | null}
+  Copy column names from how the user names them; the system resolves them to
+  the real headers deterministically (accent/case-insensitive). Use "date_eq"
+  when the filter value is a date ("19 de mayo", "el 1 de mayo"). Use null for
+  drive_query for free-form/prose analysis ("resume este documento", "¿de qué
+  trata?", "what's the main point") — those are NOT row queries.
 
 DO NOT fill event fields when the user is asking a question about existing events
 ("tengo reunión?", "do I have a meeting?", "cuál es mi próximo evento?", "¿qué tengo hoy?").
@@ -194,6 +211,7 @@ Output format:
   "list_item": <string or null>, "list_label": <string or null>,
   "drive_intent": <"find"|"read"|"analyze"|"modify"|null>,
   "drive_file_ref": <string or null>, "drive_edit": <object or null>,
+  "drive_query": <object or null>,
   "raw_message": <original message> }"""
 
 
@@ -331,6 +349,12 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
         drive_file_ref = data.get("drive_file_ref")
         raw_drive_edit = data.get("drive_edit")
         drive_edit = raw_drive_edit if isinstance(raw_drive_edit, dict) else None
+        raw_drive_query = data.get("drive_query")
+        drive_query = (
+            raw_drive_query
+            if isinstance(raw_drive_query, dict) and drive_intent == "analyze"
+            else None
+        )
 
         return ParsedMessage(
             amount=amount,
@@ -351,6 +375,7 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             drive_intent=drive_intent,
             drive_file_ref=drive_file_ref,
             drive_edit=drive_edit,
+            drive_query=drive_query,
         )
 
     except Exception as e:
