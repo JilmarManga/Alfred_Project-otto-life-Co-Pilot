@@ -185,6 +185,8 @@ def _handle_file_ref(phone: str, text: str, lang: str, user: dict, pending: dict
     payload = {"file_ref": ref}
     if intent == "modify" and pending.get("edit_spec"):
         payload["edit_spec"] = pending["edit_spec"]
+    if intent == "analyze" and pending.get("query_spec"):
+        payload["query_spec"] = pending["query_spec"]
 
     # Clear before dispatch; a modify will set its own confirmation stash, and
     # an ambiguous name will set its own awaiting_file_choice stash.
@@ -223,6 +225,8 @@ def _handle_file_choice(phone: str, text: str, lang: str, user: dict, pending: d
     payload = {"file_ref": picked.get("name")}
     if intent == "modify" and pending.get("edit_spec"):
         payload["edit_spec"] = pending["edit_spec"]
+    if intent == "analyze" and pending.get("query_spec"):
+        payload["query_spec"] = pending["query_spec"]
 
     # Clear the choice stash before dispatch; propose_modification will set its
     # own awaiting_modify_confirmation stash if it produces a preview.
