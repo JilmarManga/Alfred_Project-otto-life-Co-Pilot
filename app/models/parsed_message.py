@@ -27,3 +27,8 @@ class ParsedMessage(BaseModel):
     drive_file_ref: Optional[str] = Field(None, description="Drive file name exactly as the user referred to it — not normalized or translated.")
     drive_edit: Optional[Dict[str, Any]] = Field(None, description="Structured, deterministic edit spec for a modify intent. Validated by the agent before anything is staged; never applied without explicit user confirmation.")
     drive_query: Optional[Dict[str, Any]] = Field(None, description="Structured tabular query spec for an analyze intent over a spreadsheet (filters/group_by/select/sort/aggregate). Resolved deterministically by query_resolver — the LLM never selects rows. Null when the analyze request is not a structured row query (free-form/prose analysis).")
+    reminder_intent: Optional[Literal["set", "list", "cancel"]] = Field(None, description="User's personal-reminder intent (set/list/cancel), or None. Distinct from the calendar reminders on/off setting.")
+    reminder_text: Optional[str] = Field(None, description="What to be reminded of, exactly as the user phrased it, WITHOUT the time words. null if not a reminder.")
+    reminder_time: Optional[str] = Field(None, description="ISO 8601 datetime with tz offset when the user gave a concrete clock time; a date at 00:00 with tz offset when only a date was given; null otherwise.")
+    reminder_period: Optional[Literal["morning", "afternoon", "night"]] = Field(None, description="Part-of-day when the user gave no concrete clock time, or None.")
+    reminder_cancel_ref: Optional[str] = Field(None, description="Free-text reference identifying which reminder to cancel, as the user said it. null unless reminder_intent is 'cancel'.")

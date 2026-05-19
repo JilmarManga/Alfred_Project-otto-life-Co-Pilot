@@ -195,6 +195,24 @@ find, read, analyze, or modify a file/document/spreadsheet in their Drive:
   drive_query for free-form/prose analysis ("resume este documento", "¿de qué
   trata?", "what's the main point") — those are NOT row queries.
 
+Personal reminders — fill these ONLY when the user wants a personal nudge/ping
+(NOT a calendar event, NOT the calendar reminders on/off setting):
+- reminder_intent: "set" (create a reminder), "list" (ask what reminders they
+  have), "cancel" (remove a reminder); null otherwise.
+- reminder_text: the thing to be reminded of, exactly as phrased, WITHOUT the
+  time words (e.g. "remind me to call my mom tomorrow" → "call my mom",
+  "recuérdame pagar el arriendo el viernes" → "pagar el arriendo").
+- reminder_time: ISO 8601 with tz offset when a concrete clock time is given
+  ("at 3pm", "a las 7"). When only a date is given (no clock time) return that
+  date at 00:00 with tz offset. Resolve relative dates ("mañana", "el viernes")
+  using the Today/Timezone context. null when no time AND no date at all.
+- reminder_period: "morning" | "afternoon" | "night" when the user only gave a
+  part of day ("in the morning", "por la tarde", "tonight"); null otherwise.
+- reminder_cancel_ref: when reminder_intent is "cancel", the words identifying
+  which reminder ("the gym one", "lo de llamar a mi mamá"); null otherwise.
+Set BOTH reminder_period and reminder_time to null when the user gave NO
+time-of-day at all (the system will ask).
+
 DO NOT fill event fields when the user is asking a question about existing events
 ("tengo reunión?", "do I have a meeting?", "cuál es mi próximo evento?", "¿qué tengo hoy?").
 DO NOT fill event fields when the user references events vaguely ("next event",
@@ -212,6 +230,10 @@ Output format:
   "drive_intent": <"find"|"read"|"analyze"|"modify"|null>,
   "drive_file_ref": <string or null>, "drive_edit": <object or null>,
   "drive_query": <object or null>,
+  "reminder_intent": <"set"|"list"|"cancel"|null>,
+  "reminder_text": <string or null>, "reminder_time": <ISO 8601 string or null>,
+  "reminder_period": <"morning"|"afternoon"|"night"|null>,
+  "reminder_cancel_ref": <string or null>,
   "raw_message": <original message> }"""
 
 
@@ -356,6 +378,22 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             else None
         )
 
+        raw_reminder_intent = data.get("reminder_intent")
+        reminder_intent = (
+            raw_reminder_intent
+            if raw_reminder_intent in {"set", "list", "cancel"}
+            else None
+        )
+        reminder_text = data.get("reminder_text")
+        reminder_time = data.get("reminder_time")
+        raw_reminder_period = data.get("reminder_period")
+        reminder_period = (
+            raw_reminder_period
+            if raw_reminder_period in {"morning", "afternoon", "night"}
+            else None
+        )
+        reminder_cancel_ref = data.get("reminder_cancel_ref")
+
         return ParsedMessage(
             amount=amount,
             currency=currency,
@@ -376,6 +414,11 @@ async def parse_message(raw_text: str, user_context: dict = None) -> ParsedMessa
             drive_file_ref=drive_file_ref,
             drive_edit=drive_edit,
             drive_query=drive_query,
+            reminder_intent=reminder_intent,
+            reminder_text=reminder_text,
+            reminder_time=reminder_time,
+            reminder_period=reminder_period,
+            reminder_cancel_ref=reminder_cancel_ref,
         )
 
     except Exception as e:
