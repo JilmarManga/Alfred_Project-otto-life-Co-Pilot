@@ -135,7 +135,8 @@ def handle_pending_drive(inbound: InboundMessage, user: Optional[dict]) -> bool:
 
     step = pending.get("step")
     if step not in {"awaiting_file_ref", "awaiting_file_choice",
-                    "awaiting_modify_confirmation"}:
+                    "awaiting_modify_confirmation",
+                    "awaiting_column_clarification"}:
         update_user_context(phone, "pending_drive", None)
         return False
 
@@ -163,6 +164,8 @@ def handle_pending_drive(inbound: InboundMessage, user: Optional[dict]) -> bool:
         return _handle_file_ref(phone, text, lang, user, pending)
     if step == "awaiting_file_choice":
         return _handle_file_choice(phone, text, lang, user, pending)
+    if step == "awaiting_column_clarification":
+        return _handle_column_clarification(phone, text, lang, user, pending)
     return _handle_modify_confirmation(phone, text, lang, user, pending)
 
 
@@ -235,6 +238,56 @@ def _handle_file_choice(phone: str, text: str, lang: str, user: dict, pending: d
     result = DriveAgent().run_skill(
         skill,
         SkillContext(user=user_with_phone, inbound_text=text, payload=payload),
+    )
+    reply = format_response(result, user_with_phone)
+    if reply:
+        send_whatsapp_message(phone, reply)
+    return True
+
+
+def _handle_column_clarification(phone: str, text: str, lang: str, user: dict, pending: dict) -> bool:
+    """Tier 2: the user was asked which REAL header an ambiguous phrase meant.
+    Map the reply to a header (affirmative -> the suggested one; else match
+    the reply against the real header list / ordinal), patch the query spec,
+    and re-run the unchanged deterministic engine. No LLM, no row selection."""
+    from app.agents.drive_agent import DriveAgent
+    from app.agents.drive_agent._shared.query_resolver import remap_spec_column
+    from app.agents.drive_agent.skill_context import SkillContext
+
+    headers = pending.get("headers") or []
+    suggested = pending.get("suggested_header")
+
+    chosen = None
+    if suggested and _is_affirmative(text):
+        chosen = suggested
+    else:
+        picked = _match_candidate(text, [{"name": h} for h in headers])
+        if picked is not None:
+            chosen = picked["name"]
+
+    if not chosen:
+        update_user_context(phone, "pending_drive", None)
+        send_whatsapp_message(
+            phone, _UNKNOWN_CHOICE_ACK.get(lang, _UNKNOWN_CHOICE_ACK["es"]),
+        )
+        return True
+
+    spec = remap_spec_column(
+        pending.get("query_spec") or {},
+        pending.get("failed_column") or "", chosen,
+    )
+
+    # Clear before dispatch; a still-unresolved column will set its own
+    # awaiting_column_clarification stash again (iterative, one column/turn).
+    update_user_context(phone, "pending_drive", None)
+
+    user_with_phone = {**user, "phone_number": phone}
+    result = DriveAgent().run_skill(
+        "analyze_file",
+        SkillContext(user=user_with_phone,
+                     inbound_text=pending.get("original_text") or text,
+                     payload={"file_ref": pending.get("file_ref"),
+                              "query_spec": spec}),
     )
     reply = format_response(result, user_with_phone)
     if reply:

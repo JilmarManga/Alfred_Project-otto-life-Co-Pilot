@@ -35,6 +35,31 @@ def _fold(v: Any) -> str:
     return "".join(c for c in s if not unicodedata.combining(c))
 
 
+# Spanish/English filler words dropped before token matching so a user's
+# paraphrase ("Fecha de Vencimiento") resolves the real header
+# ("Vencimiento"). Deliberately small — only true connectives.
+_STOPWORDS = {
+    "de", "del", "la", "las", "los", "el", "un", "una", "y", "o", "en",
+    "con", "por", "para", "al", "a",
+    "the", "of", "and", "or", "in", "on", "at", "to", "for", "by", "with",
+}
+
+
+def _stem(tok: str) -> str:
+    """Light singular fold: drop a single trailing 's' (len>3) so
+    'clientes'->'cliente', 'vencimientos'->'vencimiento'. We deliberately do
+    NOT strip 'es' as a unit — that would turn 'clientes'->'client' while the
+    real header 'cliente' has no trailing 's', breaking the very match we need."""
+    return tok[:-1] if len(tok) > 3 and tok.endswith("s") else tok
+
+
+def _tokens(name: Any) -> set:
+    """Folded → split on non-alphanumerics → drop stopwords → light stem.
+    Returns the set of meaningful tokens used for header matching."""
+    raw = re.split(r"[^0-9a-z]+", _fold(name))
+    return {_stem(t) for t in raw if t and t not in _STOPWORDS}
+
+
 def col_letter(idx: int) -> str:
     """0 -> A, 25 -> Z, 26 -> AA. Same helper shape as edit_resolver."""
     s, n = "", idx
@@ -143,15 +168,75 @@ def validate_query_spec(spec: Optional[dict]) -> Optional[str]:
 
 
 def _resolve_header(headers_folded: List[str], name: Any) -> int:
-    """Index of `name` in headers (accent/case-insensitive). -1 if absent.
-    Falls back to a unique substring match so 'cliente' resolves a
-    'Nombre del Cliente' header — but only when exactly one header
-    contains it (ambiguity is refused, never guessed)."""
+    """Index of `name` in headers. -1 if it can't be UNIQUELY resolved.
+
+    Tier 0 of column understanding (no LLM):
+      1. exact accent/case-folded equality (fast path — unchanged behavior);
+      2. else token-set match: accent/case fold + tokenize + drop
+         stopwords + light stem, then a header is a candidate when its
+         token set is a subset of the phrase's (or vice-versa) OR their
+         Jaccard overlap is >= 0.6.
+    Unique-or-refuse is preserved: 0 or 2+ candidates -> -1 (never guess).
+    This resolves plurals ('vencimientos'), inflections ('clientes') and
+    paraphrase ('Fecha de Vencimiento') without touching row selection."""
     key = _fold(name)
     if key in headers_folded:
         return headers_folded.index(key)
-    hits = [i for i, h in enumerate(headers_folded) if key and key in h]
+
+    want = _tokens(name)
+    if not want:
+        return -1
+    hits = []
+    for i, h in enumerate(headers_folded):
+        htoks = _tokens(h)
+        if not htoks:
+            continue
+        if want <= htoks or htoks <= want:
+            hits.append(i)
+            continue
+        inter = len(want & htoks)
+        if inter and inter / len(want | htoks) >= 0.6:
+            hits.append(i)
     return hits[0] if len(hits) == 1 else -1
+
+
+def best_header_guess(headers: List[str], name: Any) -> Optional[str]:
+    """Closest real header to `name` by token overlap — only to SUGGEST in
+    the Tier 2 clarify question (the user still confirms). Never selects
+    rows; never auto-applies. Returns None if nothing overlaps at all."""
+    want = _tokens(name)
+    if not want:
+        return None
+    best, best_score = None, 0.0
+    for h in headers:
+        ht = _tokens(h)
+        if not ht:
+            continue
+        score = len(want & ht) / len(want | ht)
+        if score > best_score:
+            best, best_score = h, score
+    return best
+
+
+def remap_spec_column(spec: dict, old: str, new: str) -> dict:
+    """Return a deep copy of `spec` with every column slot whose value
+    equals `old` replaced by `new`. Used by Tier 2 after the user confirms
+    which real header an ambiguous phrase meant. Pure; never touches rows —
+    the unchanged resolver then runs on the corrected spec."""
+    import copy
+    s = copy.deepcopy(spec)
+    for fl in s.get("filters") or []:
+        if str(fl.get("column")) == old:
+            fl["column"] = new
+    for k in ("group_by", "sort"):
+        if s.get(k) is not None and str(s[k]) == old:
+            s[k] = new
+    if isinstance(s.get("select"), list):
+        s["select"] = [new if str(x) == old else x for x in s["select"]]
+    agg = s.get("aggregate")
+    if isinstance(agg, str) and agg.startswith("sum:") and agg[4:].strip() == old:
+        s["aggregate"] = "sum:" + new
+    return s
 
 
 def resolve_query(values: List[List[str]], spec: dict) -> Dict[str, Any]:

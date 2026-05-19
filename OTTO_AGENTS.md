@@ -210,16 +210,17 @@ Router integration: `ListAgent.matches(parsed)` is the first agent to use a patt
 | File | Purpose |
 |---|---|
 | `__init__.py` | Re-exports `DriveAgent`. |
-| `agent.py` | `_SKILLS` registry + `matches()` (Drive noun **and** action, or LLM `drive_intent`). On dead/missing token sends the (re)connect link as a side effect and returns a silent handled sentinel (CalendarAgent convention). Centralizes the `awaiting_file_choice` stash. |
+| `agent.py` | `_SKILLS` registry + `matches()` (Drive noun **and** action, or LLM `drive_intent`). On dead/missing token sends the (re)connect link as a side effect and returns a silent handled sentinel (CalendarAgent convention). Centralizes the `awaiting_file_choice` **and `awaiting_column_clarification`** (Tier 2) stashes. |
 | `skill_context.py` | `SkillContext` + `SkillResult`. |
 | `skills/base.py` | `DriveSkill` ABC (no LLM/WhatsApp/formatting; Drive API I/O allowed; **never writes** except apply_modification). |
-| `skills/find_file.py` / `read_file.py` / `analyze_file.py` | Resolve a file by name; 0 → `file_not_found`, >1 → `drive_file_choice`, 1 → list / raw content / content+question. `analyze` carries the question for the Layer-4 LLM. |
+| `skills/find_file.py` / `read_file.py` / `analyze_file.py` | Resolve a file by name; 0 → `file_not_found`, >1 → `drive_file_choice`, 1 → list / raw content / content+question. `analyze` carries the question for the Layer-4 LLM. Structured tabular `analyze` runs `query_resolver` deterministically; an unresolved column is intercepted into a Tier 2 `drive_clarify_column` (ask → confirm → re-run on the corrected spec), never a dead-end error. |
 | `skills/propose_modification.py` | Validates the spec, resolves the file + exact change deterministically, stages `pending_drive` (`awaiting_modify_confirmation`). **Writes nothing.** |
 | `skills/apply_modification.py` | Gate-only. Re-checks `headRevisionId`; on drift returns `drive_modify_revision_conflict` (no write). Sole writer. |
 | `_shared/drive_client.py` | Per-user token decrypt + `resolve_file` (exact-name promotion over `contains`). |
 | `_shared/edit_resolver.py` | Pure deterministic spec→change resolution. Refuses on 0/>1 matches. Shared by propose + apply. |
+| `_shared/query_resolver.py` | Pure deterministic tabular row selection (`resolve_query`, untouched). Tier 0 column understanding: `_resolve_header` (fold + tokenize + stopwords + light stem; unique-or-refuse). Tier 2 helpers: `best_header_guess` (suggest), `remap_spec_column` (apply the user's confirmed header). The LLM never maps columns and never selects rows. |
 
-Gate: `app/handlers/pending_drive_handler.py` — two-step (`awaiting_file_choice` / `awaiting_modify_confirmation`). Abort wins; only an explicit affirmative applies; a stale (>10 min) stage expires unapplied.
+Gate: `app/handlers/pending_drive_handler.py` — `awaiting_file_ref` / `awaiting_file_choice` / `awaiting_modify_confirmation` / `awaiting_column_clarification` (Tier 2: maps the reply to a real header or the suggestion, patches the spec, re-runs the deterministic engine). Abort wins; only an explicit affirmative applies a modify; a stale (>10 min) stage expires unapplied.
 
 Service/OAuth: `services/google_drive.py`, `services/google_drive_oauth.py` (ISOLATED — own state namespace; see CLAUDE.md Hard Rule #17), `services/drive_connect.py`. No repository — the Drive API is the store of record.
 

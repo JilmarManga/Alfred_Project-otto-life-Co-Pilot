@@ -13,6 +13,10 @@ Pure unit tests — no network, no LLM, no Firebase (stubbed by conftest).
 """
 import app.responder.response_formatter as rf
 from app.agents.drive_agent._shared.query_resolver import (
+    _fold,
+    _resolve_header,
+    best_header_guess,
+    remap_spec_column,
     resolve_query,
     validate_query_spec,
 )
@@ -96,6 +100,51 @@ def test_date_eq_matches_slash_format_and_year_optional():
     })
     assert one["ok"] and two["ok"]
     assert one["total_rows"] == two["total_rows"] == 10
+
+
+# ---- Tier 0: column UNDERSTANDING (plurals / inflection / paraphrase) ---- #
+
+def test_tier0_resolves_inflected_and_paraphrased_columns():
+    """The exact failure from the incident: a literal matcher dead-ended on
+    'vencimientos' / 'clientes' / 'Fecha de Vencimiento'. Tier 0 resolves
+    them; an unknown column still refuses (unique-or-refuse preserved)."""
+    H = ["Cliente", "Tipo de Impuesto", "Vencimiento", "Estado"]
+    hf = [_fold(h) for h in H]
+    assert _resolve_header(hf, "vencimientos") == 2
+    assert _resolve_header(hf, "clientes") == 0
+    assert _resolve_header(hf, "Fecha de Vencimiento") == 2
+    assert _resolve_header(hf, "impuestos") == 1
+    # Unchanged guarantees:
+    assert _resolve_header(hf, "Vencimiento") == 2      # exact fast path
+    assert _resolve_header(hf, "estado") == 3           # accent/case fold
+    assert _resolve_header(hf, "NoExiste") == -1        # refuse, never guess
+
+
+def test_tier0_ambiguous_column_is_refused_not_guessed():
+    """Two headers plausibly match → -1 (Tier 2 will clarify, never guess)."""
+    H = ["Cliente", "Fecha de emisión", "Fecha de vencimiento", "Estado"]
+    hf = [_fold(h) for h in H]
+    assert _resolve_header(hf, "fecha") == -1
+    # …but the closest-guess helper still SUGGESTS one for the clarify Q.
+    assert best_header_guess(H, "fecha") in (
+        "Fecha de emisión", "Fecha de vencimiento")
+
+
+def test_remap_spec_column_rewrites_every_slot():
+    spec = {
+        "filters": [{"column": "fecha", "op": "date_eq", "value": "19 de mayo"},
+                    {"column": "Estado", "op": "eq", "value": "x"}],
+        "group_by": "fecha", "select": ["fecha", "Estado"],
+        "sort": "fecha", "aggregate": "sum:fecha",
+    }
+    out = remap_spec_column(spec, "fecha", "Fecha de vencimiento")
+    assert out["filters"][0]["column"] == "Fecha de vencimiento"
+    assert out["filters"][1]["column"] == "Estado"  # untouched
+    assert out["group_by"] == "Fecha de vencimiento"
+    assert out["select"] == ["Fecha de vencimiento", "Estado"]
+    assert out["sort"] == "Fecha de vencimiento"
+    assert out["aggregate"] == "sum:Fecha de vencimiento"
+    assert spec["group_by"] == "fecha"  # original not mutated
 
 
 def test_refuses_unknown_column():
