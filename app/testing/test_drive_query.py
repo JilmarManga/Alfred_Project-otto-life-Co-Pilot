@@ -13,6 +13,10 @@ Pure unit tests — no network, no LLM, no Firebase (stubbed by conftest).
 """
 import app.responder.response_formatter as rf
 from app.agents.drive_agent._shared.query_resolver import (
+    _fold,
+    _resolve_header,
+    best_header_guess,
+    remap_spec_column,
     resolve_query,
     validate_query_spec,
 )
@@ -98,6 +102,51 @@ def test_date_eq_matches_slash_format_and_year_optional():
     assert one["total_rows"] == two["total_rows"] == 10
 
 
+# ---- Tier 0: column UNDERSTANDING (plurals / inflection / paraphrase) ---- #
+
+def test_tier0_resolves_inflected_and_paraphrased_columns():
+    """The exact failure from the incident: a literal matcher dead-ended on
+    'vencimientos' / 'clientes' / 'Fecha de Vencimiento'. Tier 0 resolves
+    them; an unknown column still refuses (unique-or-refuse preserved)."""
+    H = ["Cliente", "Tipo de Impuesto", "Vencimiento", "Estado"]
+    hf = [_fold(h) for h in H]
+    assert _resolve_header(hf, "vencimientos") == 2
+    assert _resolve_header(hf, "clientes") == 0
+    assert _resolve_header(hf, "Fecha de Vencimiento") == 2
+    assert _resolve_header(hf, "impuestos") == 1
+    # Unchanged guarantees:
+    assert _resolve_header(hf, "Vencimiento") == 2      # exact fast path
+    assert _resolve_header(hf, "estado") == 3           # accent/case fold
+    assert _resolve_header(hf, "NoExiste") == -1        # refuse, never guess
+
+
+def test_tier0_ambiguous_column_is_refused_not_guessed():
+    """Two headers plausibly match → -1 (Tier 2 will clarify, never guess)."""
+    H = ["Cliente", "Fecha de emisión", "Fecha de vencimiento", "Estado"]
+    hf = [_fold(h) for h in H]
+    assert _resolve_header(hf, "fecha") == -1
+    # …but the closest-guess helper still SUGGESTS one for the clarify Q.
+    assert best_header_guess(H, "fecha") in (
+        "Fecha de emisión", "Fecha de vencimiento")
+
+
+def test_remap_spec_column_rewrites_every_slot():
+    spec = {
+        "filters": [{"column": "fecha", "op": "date_eq", "value": "19 de mayo"},
+                    {"column": "Estado", "op": "eq", "value": "x"}],
+        "group_by": "fecha", "select": ["fecha", "Estado"],
+        "sort": "fecha", "aggregate": "sum:fecha",
+    }
+    out = remap_spec_column(spec, "fecha", "Fecha de vencimiento")
+    assert out["filters"][0]["column"] == "Fecha de vencimiento"
+    assert out["filters"][1]["column"] == "Estado"  # untouched
+    assert out["group_by"] == "Fecha de vencimiento"
+    assert out["select"] == ["Fecha de vencimiento", "Estado"]
+    assert out["sort"] == "Fecha de vencimiento"
+    assert out["aggregate"] == "sum:Fecha de vencimiento"
+    assert spec["group_by"] == "fecha"  # original not mutated
+
+
 def test_refuses_unknown_column():
     r = resolve_query(INCIDENT_GRID, {
         "filters": [{"column": "NoExiste", "op": "eq", "value": "x"}],
@@ -157,6 +206,38 @@ def test_skeleton_renders_every_group_and_row():
                  "COMERCIALIZADORA MHERG"):
         assert name in sk
     assert sk.count("  - ") == 9  # every row line present
+
+
+def test_skeleton_compacts_constant_columns_but_keeps_every_anchor():
+    """The image-2 production case: a spec with NO `select`, so every column
+    projects. The skeleton must NOT repeat constant columns on every row —
+    it lifts them to one context line — yet every distinct value still
+    appears verbatim so the anchor post-check still holds (no row loss)."""
+    no_select = {
+        "filters": [
+            {"column": "Estado", "op": "eq", "value": "pendiente"},
+            {"column": "Vencimiento", "op": "date_eq", "value": "19 de mayo"},
+        ],
+        "group_by": "Cliente",
+    }
+    res = resolve_query(INCIDENT_GRID, no_select)
+    sk = rf._drive_query_skeleton(res, "Prueba Copiloto Abril 2026", "es")
+
+    # Constant columns are lifted once, never repeated per bullet.
+    assert "_Vencimiento: 19/05/2026 · Estado: Pendiente_" in sk
+    assert "Estado: Pendiente" not in sk.replace(
+        "_Vencimiento: 19/05/2026 · Estado: Pendiente_", "")
+    # Group-by column is the header, not echoed in row bodies.
+    assert "Cliente:" not in sk
+    # Still complete: 4 groups, 9 varying rows, all clients present.
+    assert sk.count("  - ") == 9
+    for name in ("KDESIGN", "RETEKI", "INVERSIONES APARICIO AYALA",
+                 "COMERCIALIZADORA MHERG"):
+        assert name in sk
+    # Completeness contract intact: every anchor survives verbatim.
+    anchors = rf._query_anchors(res)
+    folded = rf._fold_text(sk)
+    assert all(rf._fold_text(a) in folded for a in anchors)
 
 
 def test_post_check_rejects_llm_output_that_drops_a_client():
