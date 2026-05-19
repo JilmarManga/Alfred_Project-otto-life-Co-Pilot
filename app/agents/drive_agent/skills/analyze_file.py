@@ -8,6 +8,7 @@ from app.agents.drive_agent._shared.drive_client import (
     resolve_file,
 )
 from app.agents.drive_agent._shared.query_resolver import (
+    best_header_guess,
     resolve_query,
     validate_query_spec,
 )
@@ -80,9 +81,34 @@ class AnalyzeFileSkill(DriveSkill):
                     return SkillResult(success=False, error_message=spec_error)
                 resolved = resolve_query(grid, spec)
                 if not resolved.get("ok"):
+                    err = resolved.get("error", "invalid_query_spec")
+                    # Tier 2: a column the user named couldn't be uniquely
+                    # resolved (after Tier 0). Never dead-end — ask ONE
+                    # concrete question listing the file's REAL headers and
+                    # let the pending-drive gate re-run the deterministic
+                    # engine on the corrected spec.
+                    if err == "query_column_not_found":
+                        headers = (
+                            [str(h).strip() for h in grid[0]]
+                            if grid and grid[0] else []
+                        )
+                        failed = resolved.get("detail") or ""
+                        return SkillResult(
+                            success=True,
+                            data={
+                                "type": "drive_clarify_column",
+                                "file_ref": f.get("name"),
+                                "failed_column": failed,
+                                "headers": headers,
+                                "suggested_header": best_header_guess(
+                                    headers, failed),
+                                "query_spec": spec,
+                                "question": ctx.inbound_text,
+                            },
+                        )
                     return SkillResult(
                         success=False,
-                        error_message=resolved.get("error", "invalid_query_spec"),
+                        error_message=err,
                         data={"detail": resolved.get("detail")},
                     )
                 return SkillResult(

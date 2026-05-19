@@ -228,6 +228,24 @@ class DriveAgent(BaseAgent):
                 "query_spec": data.get("query_spec"),
             })
 
+        # Tier 2 column-clarify stash: a query column couldn't be uniquely
+        # resolved; stage the question so the pending-drive gate captures the
+        # user's pick and re-runs the deterministic engine on the fixed spec.
+        if (result.success and (result.data or {}).get("type")
+                == "drive_clarify_column" and phone):
+            d = result.data
+            update_user_context(phone, "pending_drive", {
+                "step": "awaiting_column_clarification",
+                "intent": "analyze",
+                "file_ref": d.get("file_ref"),
+                "query_spec": d.get("query_spec"),
+                "failed_column": d.get("failed_column"),
+                "headers": d.get("headers", []),
+                "suggested_header": d.get("suggested_header"),
+                "original_text": d.get("question"),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+
         return AgentResult(
             agent_name=self.agent_name,
             success=result.success,

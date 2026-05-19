@@ -185,9 +185,10 @@ def test_free_form_analyze_unchanged_when_no_query_spec():
 # Use case 4 — resolver refusals surface as friendly, honest copy        #
 # --------------------------------------------------------------------- #
 
+# NOTE: an unknown/ambiguous COLUMN is no longer a dead-end refusal — it is
+# now the Tier 2 clarify round-trip (see the dedicated tests below). Only
+# bad-date and no-rows remain honest success=False refusals.
 @pytest.mark.parametrize("query,marker", [
-    ({"filters": [{"column": "NoExiste", "op": "eq", "value": "x"}]},
-     "columna"),
     ({"filters": [{"column": "Vencimiento", "op": "date_eq", "value": "algún día"}]},
      "fecha"),
     ({"filters": [{"column": "Estado", "op": "eq", "value": "anulado"}]},
@@ -289,3 +290,136 @@ def test_not_connected_sends_link_and_stays_silent():
     reply = format_response(result, USER)
     assert calls == [USER["phone_number"]]
     assert reply == ""  # webhook drops empty — agent already DM'd the link
+
+
+# --------------------------------------------------------------------- #
+# Use case 8 — Tier 0: the incident phrased in the user's OWN words      #
+#   (inflected/plural columns), end-to-end, returns EVERY client/row      #
+# --------------------------------------------------------------------- #
+
+INCIDENT_QUERY_INFLECTED = {
+    "filters": [
+        {"column": "estado", "op": "eq", "value": "pendiente"},
+        {"column": "vencimientos", "op": "date_eq", "value": "19 de mayo"},
+    ],
+    "group_by": "clientes",
+    "select": ["tipo de impuesto"],
+}
+
+
+def test_incident_inflected_wording_resolves_via_tier0_end_to_end():
+    """The exact incident message, phrased the way the user actually typed it
+    ('vencimientos', 'clientes') — must resolve with NO clarify, NO error,
+    and return ALL 4 clients / 9 rows. This is the production regression."""
+    parsed = _pm("informame todos los vencimientos del 19 de mayo con estado "
+                 "pendiente agrupados por cliente",
+                 drive_intent="analyze",
+                 drive_file_ref="Prueba Copiloto Abril 2026",
+                 drive_query=INCIDENT_QUERY_INFLECTED)
+    result, reply = _run_analyze(parsed)
+    assert result.success
+    assert result.data["type"] == "drive_query_result"
+    assert result.data["result"]["total_groups"] == 4
+    assert result.data["result"]["total_rows"] == 9
+    for c in ALL_CLIENTS:
+        assert c in reply, f"{c} missing — incident regression!"
+
+
+# --------------------------------------------------------------------- #
+# Use case 9 — Tier 2: ambiguous column → clarify question listing the   #
+#   REAL headers → user replies → full deterministic result              #
+# --------------------------------------------------------------------- #
+
+GRID_TWO_DATES = [
+    ["Cliente", "Fecha de emisión", "Fecha de vencimiento", "Estado"],
+    ["ALPHA SAS", "01/05/2026", "19/05/2026", "Pendiente"],
+    ["BETA LTDA", "02/05/2026", "19/05/2026", "Pendiente"],
+    ["GAMMA SA", "03/05/2026", "20/05/2026", "Pagado"],
+]
+AMBIG_QUERY = {
+    "filters": [
+        {"column": "Estado", "op": "eq", "value": "pendiente"},
+        {"column": "fecha", "op": "date_eq", "value": "19 de mayo"},
+    ],
+    "group_by": "Cliente",
+}
+
+
+def test_ambiguous_column_clarifies_then_round_trips_complete():
+    from app.handlers.pending_drive_handler import handle_pending_drive
+    phone = USER["phone_number"]
+    update_user_context(phone, "pending_drive", None)
+
+    parsed = _pm("dame los vencimientos del 19 de mayo pendientes por cliente",
+                 drive_intent="analyze", drive_file_ref="Cuentas",
+                 drive_query=AMBIG_QUERY)
+
+    # 1) 'fecha' matches BOTH date columns → Tier 0 refuses → Tier 2 asks.
+    result, reply = _run_analyze(parsed, grid=GRID_TWO_DATES,
+                                 file_name="Cuentas")
+    assert result.success
+    assert result.data["type"] == "drive_clarify_column"
+    # The clarify question lists the REAL headers.
+    for h in ["Cliente", "Fecha de emisión", "Fecha de vencimiento", "Estado"]:
+        assert h in reply
+    assert "fecha" in reply.lower()
+    pend = get_user_context(phone)["pending_drive"]
+    assert pend["step"] == "awaiting_column_clarification"
+
+    # 2) User names the real header → deterministic engine runs on fixed spec.
+    sent = []
+    inbound = InboundMessage(user_phone_number=phone, message_id="m2",
+                             text="Fecha de vencimiento", message_type="text")
+    a = "app.agents.drive_agent.skills.analyze_file"
+    with patch(f"{a}.get_drive_refresh_token", return_value="tok"), \
+         patch(f"{a}.resolve_file",
+               return_value=("ok", [{"id": "c", "name": "Cuentas",
+                                     "mimeType": SHEET_MIME}])), \
+         patch(f"{a}.google_drive.get_grid", return_value=GRID_TWO_DATES), \
+         patch("app.responder.response_formatter.openai", _llm("warm")), \
+         patch("app.handlers.pending_drive_handler.send_whatsapp_message",
+               side_effect=lambda p, m: sent.append(m)):
+        consumed = handle_pending_drive(inbound, USER)
+
+    assert consumed is True
+    assert len(sent) == 1
+    # Only the two 19/05 + Pendiente rows, grouped by client — complete.
+    assert "ALPHA SAS" in sent[0] and "BETA LTDA" in sent[0]
+    assert "GAMMA SA" not in sent[0]  # 20/05 + Pagado correctly excluded
+
+
+# --------------------------------------------------------------------- #
+# Use case 10 — HORIZONTALITY: a COMPLETELY different document, user's   #
+#   own words, NO code changes — same machinery proves it's generic      #
+# --------------------------------------------------------------------- #
+
+SALES_GRID = [
+    ["Vendedor", "Producto", "Fecha de entrega", "Estado de pago"],
+    ["María", "Teclado", "10/05/2026", "Sin pagar"],
+    ["María", "Monitor", "12/05/2026", "Pagado"],
+    ["Pedro", "Mouse", "11/05/2026", "Sin pagar"],
+    ["María", "Webcam", "13/05/2026", "Sin pagar"],
+]
+
+
+def test_horizontality_sales_sheet_users_own_words_no_code_change():
+    """A sales sheet (not a tax sheet) with the query phrased as the user
+    would say it: 'agrúpame los pedidos sin pagar por vendedor'. The LLM
+    (simulated here) emits inflected column names; Tier 0 must resolve them
+    against THIS file's real headers with no per-document code."""
+    q = {
+        "filters": [{"column": "pagos", "op": "eq", "value": "sin pagar"}],
+        "group_by": "vendedor",
+        "select": ["producto"],
+    }
+    parsed = _pm("agrúpame los pedidos sin pagar por vendedor",
+                 drive_intent="analyze", drive_file_ref="Ventas",
+                 drive_query=q)
+    result, reply = _run_analyze(parsed, grid=SALES_GRID, file_name="Ventas")
+    assert result.success
+    assert result.data["type"] == "drive_query_result"
+    res = result.data["result"]
+    assert res["group_by"] == "Vendedor"
+    by = {g["key"]: g["count"] for g in res["groups"]}
+    assert by == {"María": 2, "Pedro": 1}  # only 'Sin pagar' rows
+    assert "María" in reply and "Pedro" in reply

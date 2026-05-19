@@ -411,6 +411,17 @@ _DRIVE_FIND_COPY = {
     "en": "I found these files 📁\n{options}",
 }
 
+# Tier 2 column-clarify question — deterministic, lists the file's REAL
+# headers so the user maps their phrasing to a real column (no LLM).
+_DRIVE_CLARIFY_COLUMN_SUGGEST_COPY = {
+    "es": "En esa hoja veo estas columnas: {headers}.\n\nCuando dices «{failed}», ¿te refieres a la columna *{suggested}*? Si no, dime cuál de esas es 🙂",
+    "en": "In that sheet I see these columns: {headers}.\n\nWhen you say “{failed}”, do you mean the *{suggested}* column? If not, tell me which of those it is 🙂",
+}
+_DRIVE_CLARIFY_COLUMN_PLAIN_COPY = {
+    "es": "En esa hoja veo estas columnas: {headers}.\n\nNo identifiqué a qué columna te refieres con «{failed}». ¿Cuál de esas es? 🙂",
+    "en": "In that sheet I see these columns: {headers}.\n\nI couldn't tell which column you meant by “{failed}”. Which of those is it? 🙂",
+}
+
 _DRIVE_READ_COPY = {
     "es": "📄 {file_name}\n\n{content}",
     "en": "📄 {file_name}\n\n{content}",
@@ -811,6 +822,21 @@ def format_response(result: AgentResult, user: dict) -> str:
             return _DRIVE_FILE_CHOICE_COPY.get(lang, _DRIVE_FILE_CHOICE_COPY["es"]).format(
                 name=data.get("requested_name") or "",
                 options=_render_drive_options(data.get("candidates") or []),
+            )
+        if data_type == "drive_clarify_column":
+            headers = data.get("headers") or []
+            suggested = data.get("suggested_header")
+            if suggested:
+                tmpl = _DRIVE_CLARIFY_COLUMN_SUGGEST_COPY
+                return tmpl.get(lang, tmpl["es"]).format(
+                    headers=", ".join(headers),
+                    failed=data.get("failed_column") or "",
+                    suggested=suggested,
+                )
+            tmpl = _DRIVE_CLARIFY_COLUMN_PLAIN_COPY
+            return tmpl.get(lang, tmpl["es"]).format(
+                headers=", ".join(headers),
+                failed=data.get("failed_column") or "",
             )
         if data_type == "drive_find":
             return _DRIVE_FIND_COPY.get(lang, _DRIVE_FIND_COPY["es"]).format(
